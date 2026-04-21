@@ -7,6 +7,10 @@
     "build": "next build",
     "start": "next start"
     "homepage": "https://x01337.github.io/prod/"
+     "scripts": {
+    "predeploy": "npm run build",
+    "deploy": "gh-pages -d build"
+  },
   },
   "dependencies": {
     "next": "14.2.29",
