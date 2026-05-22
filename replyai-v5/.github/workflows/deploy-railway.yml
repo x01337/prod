@@ -1,0 +1,30 @@
+name: Deploy to Railway
+
+# Triggers automatically when you push to main/master.
+# Requires one GitHub secret: RAILWAY_TOKEN
+# Get it at: railway.app → Account → API Tokens
+
+on:
+  push:
+    branches: [main, master]
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: []   # runs immediately (no dependency on CI job)
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy to Railway
+        run: railway up --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+      - name: ✅ Deployed
+        run: echo "Deployment triggered. Check railway.app for status."
