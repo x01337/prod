@@ -32,14 +32,6 @@ const PG_SCHEMA = `
     whatsapp_phone_id   TEXT NOT NULL DEFAULT '',
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
-  CREATE TABLE IF NOT EXISTS password_reset_tokens (
-    id         SERIAL PRIMARY KEY,
-    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    token      TEXT NOT NULL UNIQUE,
-    expires_at TIMESTAMPTZ NOT NULL,
-    used       BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  );
   CREATE TABLE IF NOT EXISTS email_verifications (
     id         SERIAL PRIMARY KEY,
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -123,6 +115,10 @@ async function pgEnsureSchema(pool) {
     "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'booked'",
     "ALTER TABLE availability ADD COLUMN IF NOT EXISTS start_time TEXT NOT NULL DEFAULT '09:00'",
     "ALTER TABLE availability ADD COLUMN IF NOT EXISTS end_time TEXT NOT NULL DEFAULT '17:00'",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_status TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()",
   ];
   for (const m of migrations) {
     try { await pool.query(m); } catch (_) {}
@@ -170,16 +166,6 @@ async function getSqliteDb() {
     : new SQL.Database();
   _sqliteDb._path = DB_PATH;
 
-  _sqliteDb.run(`
-    CREATE TABLE IF NOT EXISTS password_reset_tokens (
-      id         INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id    INTEGER NOT NULL,
-      token      TEXT NOT NULL UNIQUE,
-      expires_at TEXT NOT NULL,
-      used       INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-  `);
   _sqliteDb.run(`
     CREATE TABLE IF NOT EXISTS users (
       id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -272,6 +258,9 @@ async function getSqliteDb() {
     "ALTER TABLE appointments ADD COLUMN status TEXT NOT NULL DEFAULT 'booked'",
     "ALTER TABLE availability ADD COLUMN start_time TEXT NOT NULL DEFAULT '09:00'",
     "ALTER TABLE availability ADD COLUMN end_time TEXT NOT NULL DEFAULT '17:00'",
+    "ALTER TABLE users ADD COLUMN stripe_customer_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE users ADD COLUMN stripe_subscription_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE users ADD COLUMN subscription_status TEXT NOT NULL DEFAULT ''",
   ];
   for (const m of migrations) {
     try { _sqliteDb.run(m); } catch (_) {}

@@ -94,14 +94,6 @@ export default function Login() {
                 <input className="input" type="password" placeholder="••••••••" required
                   value={form.password} onChange={e => setForm(f => ({ ...f, password: e.target.value }))} />
               </div>
-              <div style={{ textAlign: "right", marginTop: 6 }}>
-                <Link href="/forgot-password"
-                  style={{ fontSize: 12, color: "var(--text-dim)", textDecoration: "none" }}
-                  onMouseEnter={e => e.currentTarget.style.color = "var(--orange)"}
-                  onMouseLeave={e => e.currentTarget.style.color = "var(--text-dim)"}>
-                  Forgot password?
-                </Link>
-              </div>
 
               {error && (
                 <div style={{ background: "rgba(255,60,60,0.08)", border: "1px solid rgba(255,60,60,0.2)", borderRadius: "var(--radius-sm)", padding: "10px 14px", marginBottom: 18, fontSize: 13, color: "#f77" }}>

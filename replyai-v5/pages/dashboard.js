@@ -3,6 +3,7 @@ import Head from "next/head";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/router";
 import CalendarView from "../components/CalendarView";
+import AnalyticsDashboard from "../components/AnalyticsDashboard";
 
 // ─── Auth hook ───────────────────────────────────────────────────────────────
 function useAuth() {
@@ -79,6 +80,12 @@ export default function Dashboard() {
             <NavBtn icon={<GridCalIcon />} label="Calendar" active={view === "calendar"}
               badge={null}
               onClick={() => { setView("calendar"); setMobileOpen(false); }} />
+            <NavBtn icon={<AnalyticsIcon />} label="Analytics" active={view === "analytics"}
+              badge={null}
+              onClick={() => { setView("analytics"); setMobileOpen(false); }} />
+            <NavBtn icon={<BillingIcon />} label="Billing" active={view === "billing"}
+              badge={null}
+              onClick={() => { setView("billing"); setMobileOpen(false); }} />
             <NavBtn icon={<MessageIcon />} label="Messages" active={view === "messages"}
               badge={null}
               onClick={() => { setView("messages"); setMobileOpen(false); }} />
@@ -122,7 +129,7 @@ export default function Dashboard() {
             display: view === "calendar" ? "flex" : "block",
             flexDirection: "column",
             overflow: view === "calendar" ? "hidden" : "auto",
-            minHeight: 0,
+            height: view === "calendar" ? "0" : "auto",
           }}>
             {view === "chat"
               ? <ChatPanel faqs={faqs} user={user} />
@@ -132,6 +139,10 @@ export default function Dashboard() {
               ? <AppointmentsPanel />
               : view === "calendar"
               ? <CalendarView />
+              : view === "analytics"
+              ? <AnalyticsDashboard />
+              : view === "billing"
+              ? <BillingPanel user={user} />
               : view === "services"
               ? <ServicesPanel />
               : view === "messages"
@@ -551,6 +562,8 @@ const SettingsIcon = () => <svg width="15" height="15" viewBox="0 0 24 24" fill=
 const CalendarIcon = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>;
 const GridCalIcon  = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9M15 21V9"/></svg>;
 const ServicesIcon = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>;
+const AnalyticsIcon = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>;
+const BillingIcon   = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>;
 const MessageIcon = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>;
 const AlertIcon = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>;
 const EmailIcon = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>;
@@ -1596,6 +1609,90 @@ function ServicesPanel() {
             </div>
           ))}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── BILLING PANEL ────────────────────────────────────────────────────────────
+function BillingPanel({ user }) {
+  const [loading, setLoading] = useState(false);
+  const plan = user?.plan || "free";
+  const isPaid = plan !== "free";
+
+  async function openPortal() {
+    setLoading(true);
+    try {
+      const r = await fetch("/api/stripe/portal", { method: "POST" });
+      const d = await r.json();
+      if (d.url) window.location.href = d.url;
+      else alert(d.error || "Could not open billing portal.");
+    } catch { alert("Network error."); }
+    finally { setLoading(false); }
+  }
+
+  const planColors = { free: "#666", pro: "#ff7a00", business: "#ffd700" };
+  const planColor  = planColors[plan] || "#666";
+
+  return (
+    <div style={{ maxWidth: 600 }}>
+      <div style={{ marginBottom: 28 }}>
+        <h1 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 20, color: "var(--text)", margin: "0 0 4px" }}>Billing</h1>
+        <p style={{ color: "var(--text-dim)", fontSize: 13, margin: 0 }}>Manage your subscription and payment details.</p>
+      </div>
+
+      {/* Current plan card */}
+      <div style={{ padding: "24px", borderRadius: 12, background: "var(--surface)", border: "1px solid var(--border)", marginBottom: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+          <div>
+            <p style={{ fontSize: 11, color: "var(--text-dim)", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", margin: "0 0 6px" }}>Current plan</p>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 22, color: "var(--text)", textTransform: "capitalize" }}>{plan}</span>
+              <span style={{ fontSize: 10, fontWeight: 700, padding: "3px 9px", borderRadius: 6, textTransform: "uppercase", letterSpacing: ".07em",
+                background: `${planColor}18`, color: planColor, border: `1px solid ${planColor}33` }}>
+                {isPaid ? "Active" : "Free"}
+              </span>
+            </div>
+          </div>
+          {isPaid ? (
+            <button onClick={openPortal} disabled={loading}
+              style={{ padding: "9px 18px", borderRadius: 8, border: "1px solid var(--border)", background: "transparent", color: "var(--text-muted)", fontWeight: 600, fontSize: 13, cursor: loading ? "not-allowed" : "pointer", opacity: loading ? .6 : 1, transition: "all .15s" }}
+              onMouseEnter={e => { e.currentTarget.style.borderColor = "var(--orange)"; e.currentTarget.style.color = "var(--orange)"; }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--border)"; e.currentTarget.style.color = "var(--text-muted)"; }}>
+              {loading ? "Opening…" : "Manage billing →"}
+            </button>
+          ) : (
+            <a href="/pricing" style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: "var(--orange)", color: "#000", fontWeight: 700, fontSize: 13, textDecoration: "none", boxShadow: "0 0 14px rgba(255,122,0,.3)", transition: "box-shadow .15s" }}
+              onMouseEnter={e => e.currentTarget.style.boxShadow = "0 0 24px rgba(255,122,0,.5)"}
+              onMouseLeave={e => e.currentTarget.style.boxShadow = "0 0 14px rgba(255,122,0,.3)"}>
+              Upgrade plan →
+            </a>
+          )}
+        </div>
+
+        {isPaid && (
+          <p style={{ fontSize: 12, color: "var(--text-dim)", margin: 0 }}>
+            You can cancel, change plans, or update payment details in the Stripe billing portal.
+          </p>
+        )}
+        {!isPaid && (
+          <p style={{ fontSize: 12, color: "var(--text-dim)", margin: 0 }}>
+            Free plan includes 15 FAQs, 3 services, and 30 bookings/month. <a href="/pricing" style={{ color: "var(--orange)" }}>See all plans</a>
+          </p>
+        )}
+      </div>
+
+      {/* Plan comparison link */}
+      <div style={{ padding: "16px 20px", borderRadius: 10, background: "rgba(255,122,0,.05)", border: "1px solid rgba(255,122,0,.12)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+        <div>
+          <p style={{ fontSize: 13, fontWeight: 600, color: "var(--orange)", margin: "0 0 2px" }}>Compare all plans</p>
+          <p style={{ fontSize: 12, color: "var(--text-dim)", margin: 0 }}>Pro ($19/mo) and Business ($49/mo) plans unlock more bookings, AI responses, and team features.</p>
+        </div>
+        <a href="/pricing" style={{ flexShrink: 0, padding: "8px 16px", borderRadius: 7, background: "transparent", border: "1px solid rgba(255,122,0,.3)", color: "var(--orange)", fontWeight: 700, fontSize: 12, textDecoration: "none", whiteSpace: "nowrap", transition: "background .15s" }}
+          onMouseEnter={e => e.currentTarget.style.background = "rgba(255,122,0,.1)"}
+          onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+          View pricing →
+        </a>
       </div>
     </div>
   );

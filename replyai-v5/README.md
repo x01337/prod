@@ -1,198 +1,207 @@
-# ReplyAI
+# ReplyAI SaaS — Production-Ready AI Assistant
 
-FAQ auto-response chatbot + scheduling calendar for small businesses.
-
-Built with Next.js 14, PostgreSQL/SQLite, and zero external AI dependencies.
-
----
-
-## Features
-
-- **FAQ bot** — keyword + Jaccard similarity matching, optional AI fallback
-- **Calendar** — week view, drag & drop bookings, working hours
-- **Password recovery** — secure email reset flow
-- **WhatsApp integration** — official Meta Business API
-- **Multi-DB** — SQLite locally, PostgreSQL in production
+> Multi-tenant AI chatbot that answers messages and books clients automatically.
+> Supports WhatsApp, web chat, and Instagram. Multi-language (EN / PL / PT-BR).
 
 ---
 
-## Quick start (local dev)
+## Architecture
 
+```
+CHANNELS:  WhatsApp Cloud API · Web Widget · /chat/[userId]
+                          │
+PIPELINE:
+  1. Receive message
+  2. Deduplicate (in-memory Set, 5min TTL)
+  3. detectLanguage()   → en | pl | pt
+  4. detectIntent()     → greeting | booking | cancel | unknown
+  5. Route:
+       greeting → t("welcome_dm")
+       booking  → BookingFlow state machine (ask_date → ask_name → done)
+       cancel   → clearSession() + confirm
+       other    → findBestMatch() → getAIAnswer() → fallback
+  6. logMessage()          (every message, incoming + outgoing)
+  7. logMissedMessage()    (score < threshold → review in dashboard)
+  8. enqueue(sendFn)       (retry queue: 3 attempts, exponential backoff)
+                          │
+DATABASE:  SQLite (dev) · PostgreSQL (prod: Supabase / Neon / Railway)
+```
+
+---
+
+## Database Schema
+
+```sql
+CREATE TABLE users (
+  id SERIAL PRIMARY KEY, email TEXT UNIQUE NOT NULL,
+  password TEXT NOT NULL, name TEXT DEFAULT '',
+  plan TEXT DEFAULT 'free', booksy_url TEXT DEFAULT '',
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE faqs (
+  id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  question TEXT NOT NULL, answer TEXT NOT NULL,
+  keywords TEXT DEFAULT '', created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE appointments (
+  id SERIAL PRIMARY KEY, user_id INTEGER DEFAULT 1,
+  client_name TEXT, phone TEXT, date TEXT,
+  language TEXT DEFAULT 'en', source TEXT DEFAULT 'web',
+  status TEXT DEFAULT 'confirmed', created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- NEW: Every message logged (incoming + outgoing)
+CREATE TABLE messages (
+  id SERIAL PRIMARY KEY, user_id INTEGER DEFAULT 1,
+  phone TEXT, text TEXT, type TEXT DEFAULT 'incoming',
+  language TEXT DEFAULT 'en', intent TEXT DEFAULT 'unknown',
+  source TEXT DEFAULT 'web', created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- NEW: Unanswered questions for FAQ improvement
+CREATE TABLE missed_messages (
+  id SERIAL PRIMARY KEY, user_id INTEGER DEFAULT 1,
+  phone TEXT, text TEXT, language TEXT DEFAULT 'en',
+  source TEXT DEFAULT 'web', created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+---
+
+## New Files Added
+
+| File | Purpose |
+|------|---------|
+| `lib/intents.js` | Intent detection: greeting / booking / cancel / unknown |
+| `lib/queue.js` | Message send queue with retry + exponential backoff |
+| `pages/chat/[userId].js` | Public chat page per business |
+| `pages/booking.js` | Public booking form (EN/PL/PT, ?userId=) |
+| `pages/api/messages.js` | GET message log (with type/lang/intent filters) |
+| `pages/api/missed.js` | GET/DELETE missed messages |
+
+## Updated Files
+
+| File | Changes |
+|------|---------|
+| `lib/db.js` | Added messages, missed_messages tables; logMessage(), logMissedMessage(), isSlotAvailable() |
+| `lib/bookingFlow.js` | Uses detectIntent(), logs all messages, checks slot availability, cancel resets session |
+| `pages/api/whatsapp/webhook.js` | Full pipeline: dedup, intent, queue, logging, missed messages |
+| `pages/api/public/ask.js` | Logs all messages, saves missed messages |
+| `pages/dashboard.js` | Added Messages Log tab + Missed Messages tab |
+
+---
+
+## Test Cases
+
+### 1. Greeting
+```
+"hi" → "Hi! 👋 Thanks for your message! Want to book? Type 'booking' 📅"
+"cześć" → Polish greeting
+"oi" → Portuguese greeting
+```
+
+### 2. Full Booking Flow
+```
+"book" → "What date do you prefer?"
+"2025-06-15" → (checks slot) → "What is your name?"
+"John Smith" → "Booking confirmed ✅" (saved to DB)
+```
+
+### 3. Cancel Flow
+```
+"book" → "What date do you prefer?"
+"cancel" → "No problem, booking cancelled. How can I help? 😊"
+```
+
+### 4. Slot Full
+```
+"book" → "What date do you prefer?"
+"2025-06-15" (full) → "Sorry, 2025-06-15 is fully booked. Please choose another date."
+```
+
+### 5. FAQ Answer
+```
+"how do I reset my password" → matcher returns answer (score > 0.3)
+```
+
+### 6. Unknown → Missed
+```
+"xyzzy nonsense" → fallback message → saved to missed_messages → visible in dashboard
+```
+
+---
+
+## Deployment (Vercel + Neon PostgreSQL)
+
+### Step 1 — Get a database
+1. Sign up at [neon.tech](https://neon.tech) (free tier)
+2. Create a new project
+3. Copy the connection string: `postgres://user:pass@host/dbname`
+
+### Step 2 — Deploy
 ```bash
-git clone https://github.com/YOUR_USERNAME/replyai.git
-cd replyai
-
-npm install
-cp .env.example .env
-# Edit .env — set JWT_SECRET at minimum
-
-npm run dev
-# → http://localhost:3000
+npm install -g vercel
+vercel deploy --prod
 ```
 
-SQLite auto-creates at `data/ars.db`. No database setup needed for local dev.
-
----
-
-## Deploy to Railway (recommended — 10 minutes)
-
-Railway runs both the app and the database with minimal setup.
-
-### Step 1 — Push to GitHub
-
-```bash
-git init
-git add .
-git commit -m "Initial commit"
-git remote add origin https://github.com/YOUR_USERNAME/replyai.git
-git push -u origin main
+### Step 3 — Set environment variables in Vercel dashboard
+```
+DATABASE_URL               = postgres://... (from Neon)
+JWT_SECRET                 = <openssl rand -hex 32>
+WHATSAPP_VERIFY_TOKEN      = any-secret-string
+WHATSAPP_ACCESS_TOKEN      = from Meta Developer panel
+WHATSAPP_PHONE_NUMBER_ID   = from Meta Developer panel
+SLOT_LIMIT                 = 5
+AI_ENABLED                 = false
+AI_API_KEY                 = (optional, from openrouter.ai)
+SITE_URL                   = https://your-domain.vercel.app
 ```
 
-### Step 2 — Create Railway project
+### Step 4 — Connect WhatsApp
+1. Go to [developers.facebook.com](https://developers.facebook.com) → Your App → WhatsApp → Configuration
+2. Callback URL: `https://your-domain.vercel.app/api/whatsapp/webhook`
+3. Verify Token: same as `WHATSAPP_VERIFY_TOKEN`
+4. Subscribe to: **messages**
 
-1. Go to [railway.app](https://railway.app) and sign in with GitHub
-2. Click **New Project** → **Deploy from GitHub repo** → select your repo
-3. Railway detects Next.js and starts the first deploy automatically
-
-### Step 3 — Add PostgreSQL
-
-1. In your Railway project, click **+ Add Service** → **Database** → **PostgreSQL**
-2. Click on the PostgreSQL service → **Variables** tab
-3. Copy the `DATABASE_URL` value
-
-### Step 4 — Set environment variables
-
-In your Railway project → your app service → **Variables** tab, add:
-
-| Variable | Value |
-|---|---|
-| `JWT_SECRET` | Run `openssl rand -hex 32` and paste the result |
-| `DATABASE_URL` | Paste from the PostgreSQL service |
-| `SITE_URL` | Your Railway app URL (shown in the Deployments tab) |
-| `EMAIL_USER` | Your Gmail address (optional — for password reset emails) |
-| `EMAIL_PASS` | Your Gmail App Password (optional) |
-
-### Step 5 — Done
-
-Railway redeploys automatically. Your app is live at the URL shown in the Railway dashboard.
-
-**Auto-deploy on push:** Every `git push` to `main` triggers a new deploy automatically.
+### Step 5 — First run
+1. Visit `/register` → create your business account
+2. Dashboard → FAQ Manager → add your FAQs
+3. Settings → optionally add Booksy URL
+4. Share your public chat: `/chat/YOUR_USER_ID`
+5. Share booking form: `/booking?userId=YOUR_USER_ID`
 
 ---
 
-## Deploy to Vercel
+## Embed Widget
 
-Vercel hosts the Next.js app. You still need an external database.
-
-### Step 1 — Set up database (Supabase — free)
-
-1. Go to [supabase.com](https://supabase.com) → New project
-2. Settings → Database → Connection string → URI mode
-3. Copy the connection string (starts with `postgresql://`)
-
-### Step 2 — Deploy to Vercel
-
-1. Go to [vercel.com](https://vercel.com) → New Project → Import your GitHub repo
-2. In **Environment Variables**, add:
-   - `JWT_SECRET` — `openssl rand -hex 32`
-   - `DATABASE_URL` — your Supabase connection string
-   - `SITE_URL` — your Vercel app URL (e.g. `https://replyai.vercel.app`)
-3. Click **Deploy**
-
----
-
-## Deploy with Docker (VPS)
-
-If you have a Linux server (DigitalOcean, Hetzner, etc.):
-
-```bash
-# On your server
-git clone https://github.com/YOUR_USERNAME/replyai.git
-cd replyai
-
-cp .env.example .env
-nano .env   # set JWT_SECRET and POSTGRES_PASSWORD
-
-npm run docker:build
-npm run docker:start
-# → http://your-server-ip:3000
+```html
+<script src="https://yourdomain.com/widget.js" data-user-id="YOUR_ID"></script>
 ```
 
-| Command | Description |
-|---|---|
-| `npm run docker:build` | Build the Docker image |
-| `npm run docker:start` | Start app + PostgreSQL in background |
-| `npm run docker:stop` | Stop everything (data is preserved) |
-| `npm run docker:logs` | Watch live app logs |
-| `npm run docker:reset` | Wipe all data and start fresh |
+Auto-detects PL and PT, responds in the correct language.
 
 ---
 
-## Environment variables
+## Multi-Tenant Extension
 
-Copy `.env.example` to `.env` and fill in:
-
-| Variable | Required | Description |
-|---|---|---|
-| `JWT_SECRET` | ✅ | `openssl rand -hex 32` |
-| `DATABASE_URL` | Production | PostgreSQL connection string |
-| `SITE_URL` | Recommended | Your public URL |
-| `EMAIL_USER` | Optional | Gmail for password reset emails |
-| `EMAIL_PASS` | Optional | Gmail App Password |
-| `WHATSAPP_ACCESS_TOKEN` | Optional | Meta WhatsApp Business token |
-| `AI_ENABLED` | Optional | `true` to enable AI fallback |
-| `AI_API_KEY` | Optional | OpenRouter API key |
-| `POSTGRES_PASSWORD` | Docker only | Password for the Postgres container |
-
----
-
-## Gmail App Password setup
-
-Required for password reset emails to work.
-
-1. Go to [myaccount.google.com](https://myaccount.google.com)
-2. Security → 2-Step Verification → turn it **on**
-3. Security → App Passwords
-4. Name it "ReplyAI" → Generate
-5. Copy the 16-character code → paste into `EMAIL_PASS` (no spaces)
-
-If email is not configured, reset links are printed to the server console — useful for testing.
-
----
-
-## Project structure
-
+To give each business their own WhatsApp number:
+```sql
+ALTER TABLE users ADD COLUMN whatsapp_phone_id TEXT DEFAULT '';
 ```
-replyai/
-├── .github/workflows/     GitHub Actions (CI + auto-deploy)
-├── components/
-│   └── CalendarView.js    Week planner with drag & drop
-├── lib/
-│   ├── db.js              SQLite / PostgreSQL abstraction
-│   ├── auth.js            JWT helpers
-│   ├── matcher.js         FAQ matching engine
-│   ├── ai.js              Optional AI fallback
-│   ├── ratelimit.js       Rate limiting
-│   └── validate.js        Input validation
-├── pages/
-│   ├── api/               All API routes
-│   ├── dashboard.js       Main app
-│   ├── login.js
-│   ├── register.js
-│   ├── forgot-password.js
-│   ├── reset-password.js
-│   └── verify-email.js
-├── public/
-│   └── widget.js          Embeddable chat widget
-├── styles/globals.css
-├── Dockerfile
-├── docker-compose.yml
-├── .env.example           Template — copy to .env
-└── .gitignore
+
+Update `resolveUserId()` in `webhook.js`:
+```js
+const user = await dbGet(db, "SELECT id FROM users WHERE whatsapp_phone_id=$1", [phoneNumberId]);
+return user?.id || 1;
 ```
 
 ---
 
-## License
+## Production Notes
 
-MIT
+- Sessions and rate-limiter are in-memory — reset on Vercel cold starts
+- For true persistence at scale: migrate to Redis (Upstash) for sessions + rate limits
+- Queue is in-memory — for guaranteed delivery at scale: use BullMQ + Redis
+- DB connections are pooled (max 10) — works well on Vercel serverless

@@ -5,24 +5,19 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
-    "docker:build": "docker compose build",
-    "docker:start": "docker compose up -d",
-    "docker:stop": "docker compose down",
-    "docker:logs": "docker compose logs -f app",
-    "docker:reset": "docker compose down -v && docker compose up -d",
-    "docker:shell": "docker compose exec app sh"
+    "start": "next start"
   },
   "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cookie": "^0.6.0",
+    "jsonwebtoken": "^9.0.2",
     "next": "14.2.29",
+    "nodemailer": "^6.9.13",
+    "pg": "^8.11.5",
     "react": "^18",
     "react-dom": "^18",
     "sql.js": "^1.12.0",
-    "pg": "^8.11.5",
-    "bcryptjs": "^2.4.3",
-    "jsonwebtoken": "^9.0.2",
-    "cookie": "^0.6.0",
-    "nodemailer": "^6.9.13",
+    "stripe": "^22.1.1",
     "zod": "^3.22.4"
   },
   "devDependencies": {
