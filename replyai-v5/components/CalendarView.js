@@ -1,790 +1,801 @@
 /**
- * CalendarView.js — Redesigned calendar
+ * CalendarView.js — Month grid calendar
  *
- * Layout: collapsible left sidebar (mini month + nav) + main grid
- * Grid: time column (sticky) + 7 day columns with scrollable hour rows
- * Same functionality: drag/move, drag/resize, create, edit, delete,
- *   working-hours merge, past-date prevention, current-time line,
- *   week/day toggle, auto-center today.
+ * Layout matches the reference screenshot:
+ *   - Month title + prev/next arrows top-center
+ *   - 7 day-columns (Mon … Sun) with short day name + date number
+ *   - Today circled in orange
+ *   - Each day cell = scrollable column of time-slot chips
+ *   - Green chips  = working/available hours
+ *   - Blue chips   = booked appointments (service name + time)
+ *   - Tap empty area in a day → create modal
+ *   - Tap a chip   → edit/delete modal
+ *
+ * Data source: GET/POST/DELETE /api/calendar  (unchanged)
  */
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
-const HOUR_START = 7;
-const HOUR_END   = 21;
-const HOURS      = HOUR_END - HOUR_START;
-const CELL_H     = 56;
-const GRID_H     = HOURS * CELL_H;
-const SNAP       = 15;
-const DAYS_SHORT = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
-const MONTHS     = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-const MONTHS_S   = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-const PAL        = ["#ff7a00","#8b5cf6","#3b82f6","#ec4899","#10b981","#f59e0b","#6366f1","#ef4444"];
+import { useState, useEffect, useCallback, useMemo } from "react";
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-const pad      = n  => String(n).padStart(2,"0");
-const toISO    = d  => d.toISOString().slice(0,10);
+// ── Config ────────────────────────────────────────────────────────────────────
+const DAY_NAMES_S  = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+const DAY_NAMES_L  = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
+const MONTH_NAMES  = ["January","February","March","April","May","June",
+                      "July","August","September","October","November","December"];
+const MONTH_NAMES_S = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const PAL = ["#3b82f6","#8b5cf6","#ec4899","#10b981","#f59e0b","#6366f1","#ff7a00"];
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const pad      = n  => String(n).padStart(2, "0");
+const toISO    = d  => d.toISOString().slice(0, 10);
 const todayISO = () => toISO(new Date());
-const nowStr   = () => { const n=new Date(); return `${pad(n.getHours())}:${pad(n.getMinutes())}`; };
 
 function mondayOf(iso) {
-  const d=new Date(iso+"T00:00:00"); const dow=(d.getDay()+6)%7;
-  d.setDate(d.getDate()-dow); return toISO(d);
+  const d = new Date(iso + "T00:00:00");
+  const dow = (d.getDay() + 6) % 7;
+  d.setDate(d.getDate() - dow);
+  return toISO(d);
 }
-function addDays(iso,n) { const d=new Date(iso+"T00:00:00"); d.setDate(d.getDate()+n); return toISO(d); }
-function toMin(t)   { if(!t)return 0; const[h,m]=t.split(":").map(Number); return h*60+(m||0); }
-function toStr(m)   { return `${pad(Math.floor(m/60))}:${pad(m%60)}`; }
-function toPx(t)    { return Math.max(0,(toMin(t)-HOUR_START*60)/60*CELL_H); }
-function durPx(s,e) { return Math.max(20,Math.max(SNAP,(toMin(e)-toMin(s)))/60*CELL_H); }
-function snapM(m)   { return Math.round(m/SNAP)*SNAP; }
-function pxToMin(y) { return snapM((y/CELL_H)*60+HOUR_START*60); }
-function clampM(m)  { return Math.max(HOUR_START*60,Math.min((HOUR_END-1)*60,m)); }
-function fmt12(t)   { if(!t)return""; const[h,m]=t.split(":").map(Number); return`${h%12||12}:${pad(m)} ${h<12?"AM":"PM"}`; }
-function addM(t,m)  { const tot=toMin(t)+m; return toStr(Math.min(HOUR_END*60,tot)); }
-function hexRgba(hex,a){ try{const r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);return`rgba(${r},${g},${b},${a})`;}catch{return`rgba(255,122,0,${a})`;} }
-function isPastDate(iso){ return iso<todayISO(); }
-function isPastSlot(iso,t){ return iso<todayISO()||(iso===todayISO()&&t<=nowStr()); }
-
-function bkColor(ev) {
-  const base=ev.service_color||PAL[(Number(ev.id)||0)%PAL.length];
-  return {base,bg:hexRgba(base,0.13),border:hexRgba(base,0.5),text:base};
+function addDays(iso, n) {
+  const d = new Date(iso + "T00:00:00");
+  d.setDate(d.getDate() + n);
+  return toISO(d);
+}
+function toMin(t) {
+  if (!t) return 0;
+  const [h, m] = t.split(":").map(Number);
+  return h * 60 + (m || 0);
+}
+function addMinutes(t, mins) {
+  const total = toMin(t) + mins;
+  return `${pad(Math.floor(total / 60))}:${pad(total % 60)}`;
+}
+function fmt12(t) {
+  if (!t) return "";
+  const [h, m] = t.split(":").map(Number);
+  return `${h % 12 || 12}:${pad(m)} ${h < 12 ? "AM" : "PM"}`;
 }
 
-function mergeHours(slots) {
-  if(!slots.length)return[];
-  const s=[...slots].sort((a,b)=>toMin(a.start_time)-toMin(b.start_time));
-  const out=[{...s[0]}];
-  for(let i=1;i<s.length;i++){
-    const last=out[out.length-1],cur=s[i];
-    if(toMin(cur.start_time)<=toMin(last.end_time)){
-      if(toMin(cur.end_time)>toMin(last.end_time))last.end_time=cur.end_time;
-    } else out.push({...cur});
+function hexRgba(hex, a) {
+  try {
+    const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+    return `rgba(${r},${g},${b},${a})`;
+  } catch { return `rgba(59,130,246,${a})`; }
+}
+
+function evColor(ev) {
+  if (ev._type === "availability" || ev.status === "available") {
+    return { base: "#22c55e", text: "#4ade80", chipBg: "rgba(34,197,94,0.18)", chipBorder: "rgba(34,197,94,0.35)" };
   }
-  return out;
+  const base = ev.service_color || PAL[(Number(ev.id) || 0) % PAL.length];
+  return {
+    base,
+    text: "#fff",
+    chipBg: hexRgba(base, 0.85),
+    chipBorder: hexRgba(base, 1),
+  };
 }
 
-// ─── Mini month calendar ──────────────────────────────────────────────────────
-function MiniMonth({ focusDate, onDayClick }) {
-  const [month, setMonth] = useState(() => {
-    const d=new Date(); return { y:d.getFullYear(), m:d.getMonth() };
+// Build month: all ISO dates visible on a month grid (always 6 rows × 7 cols = 42 cells)
+function monthGrid(year, month) { // month: 0-indexed
+  const firstDay = new Date(year, month, 1);
+  const dow = (firstDay.getDay() + 6) % 7; // 0=Mon
+  const start = new Date(firstDay);
+  start.setDate(1 - dow);
+  return Array.from({ length: 42 }, (_, i) => {
+    const d = new Date(start);
+    d.setDate(start.getDate() + i);
+    return { iso: toISO(d), inMonth: d.getMonth() === month };
   });
-
-  const firstDay = new Date(month.y, month.m, 1);
-  const startDow = (firstDay.getDay()+6)%7; // Mon=0
-  const daysInMonth = new Date(month.y, month.m+1, 0).getDate();
-  const prevDays = new Date(month.y, month.m, 0).getDate();
-
-  const cells = [];
-  for(let i=0;i<startDow;i++) cells.push({day:prevDays-startDow+1+i,cur:false});
-  for(let i=1;i<=daysInMonth;i++) cells.push({day:i,cur:true});
-  while(cells.length%7!==0) cells.push({day:cells.length-daysInMonth-startDow+1,cur:false});
-
-  const todayD = new Date();
-  const todayM = todayD.getMonth();
-  const todayY = todayD.getFullYear();
-  const todayDay = todayD.getDate();
-
-  return (
-    <div style={{padding:"0 12px 12px"}}>
-      {/* Month nav */}
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
-        <button onClick={()=>setMonth(p=>{ const d=new Date(p.y,p.m-1,1);return{y:d.getFullYear(),m:d.getMonth()}; })}
-          style={{width:22,height:22,border:"0.5px solid var(--color-border-tertiary)",background:"var(--color-background-primary)",borderRadius:5,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,color:"var(--color-text-secondary)"}}>‹</button>
-        <span style={{fontSize:11,fontWeight:500,color:"var(--color-text-primary)"}}>{MONTHS_S[month.m]} {month.y}</span>
-        <button onClick={()=>setMonth(p=>{ const d=new Date(p.y,p.m+1,1);return{y:d.getFullYear(),m:d.getMonth()}; })}
-          style={{width:22,height:22,border:"0.5px solid var(--color-border-tertiary)",background:"var(--color-background-primary)",borderRadius:5,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,color:"var(--color-text-secondary)"}}>›</button>
-      </div>
-      {/* Day headers */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",marginBottom:2}}>
-        {["M","T","W","T","F","S","S"].map((d,i)=>(
-          <div key={i} style={{textAlign:"center",fontSize:9,color:"var(--color-text-tertiary)",fontWeight:500,padding:"2px 0"}}>{d}</div>
-        ))}
-      </div>
-      {/* Day cells */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:1}}>
-        {cells.map((c,i)=>{
-          const isToday=c.cur&&c.day===todayDay&&month.m===todayM&&month.y===todayY;
-          const iso=c.cur?`${month.y}-${pad(month.m+1)}-${pad(c.day)}`:null;
-          return (
-            <div key={i} onClick={()=>iso&&onDayClick(iso)}
-              style={{
-                width:"100%",aspectRatio:"1",display:"flex",alignItems:"center",justifyContent:"center",
-                fontSize:10,borderRadius:4,cursor:c.cur?"pointer":"default",
-                background:isToday?"#ff7a00":"transparent",
-                color:isToday?"#fff":c.cur?"var(--color-text-secondary)":"var(--color-text-tertiary)",
-                fontWeight:isToday?500:400,
-                transition:"background 0.1s",
-              }}
-              onMouseEnter={e=>{ if(!isToday&&c.cur) e.currentTarget.style.background="var(--color-background-secondary)"; }}
-              onMouseLeave={e=>{ if(!isToday) e.currentTarget.style.background="transparent"; }}>
-              {c.day}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
 }
 
-// ─── Main component ───────────────────────────────────────────────────────────
+function formatMonthYear(year, month) {
+  return `${MONTH_NAMES[month]} ${year}`;
+}
+
+// Group events by date
+function byDate(events) {
+  const map = {};
+  for (const ev of events) {
+    if (!map[ev.date]) map[ev.date] = [];
+    map[ev.date].push(ev);
+  }
+  // Sort each day's events by start_time
+  for (const k in map) {
+    map[k].sort((a, b) => (a.start_time || "").localeCompare(b.start_time || ""));
+  }
+  return map;
+}
+
+// ── Main Component ─────────────────────────────────────────────────────────────
 export default function CalendarView() {
-  const [monday,   setMonday]   = useState(()=>mondayOf(todayISO()));
+  const today      = todayISO();
+  const todayDate  = new Date(today + "T00:00:00");
+  const [year,  setYear]  = useState(todayDate.getFullYear());
+  const [month, setMonth] = useState(todayDate.getMonth()); // 0-indexed
+
   const [events,   setEvents]   = useState([]);
   const [services, setServices] = useState([]);
   const [loading,  setLoading]  = useState(true);
   const [modal,    setModal]    = useState(null);
-  const [nowTime,  setNowTime]  = useState(nowStr);
-  const [viewMode, setViewMode] = useState("week");
-  const [dayFocus, setDayFocus] = useState(todayISO());
   const [toast,    setToast]    = useState(null);
-  const [ghost,    setGhost]    = useState(null);
-  const [sidebar,  setSidebar]  = useState(true);
 
-  const scrollRef = useRef(null);
-  const colRefs   = useRef({});
-  const dragRef   = useRef(null);
-  const loadRef   = useRef(null);
+  // Grid of 42 cells
+  const grid = useMemo(() => monthGrid(year, month), [year, month]);
+  const eventMap = useMemo(() => byDate(events), [events]);
 
-  const days = useMemo(()=>Array.from({length:7},(_,i)=>addDays(monday,i)),[monday]);
-  const viewDays = viewMode==="day"?[dayFocus]:days;
+  // First and last ISO in view (for API fetch)
+  const viewStart = grid[0].iso;
+  const viewEnd   = grid[41].iso;
 
-  useEffect(()=>{ const id=setInterval(()=>setNowTime(nowStr()),30000); return()=>clearInterval(id); },[]);
-  useEffect(()=>{ fetch("/api/services").then(r=>r.ok?r.json():[]).then(d=>setServices(Array.isArray(d)?d:[])).catch(()=>{}); },[]);
+  // Load services
+  useEffect(() => {
+    fetch("/api/services")
+      .then(r => r.ok ? r.json() : [])
+      .then(d => setServices(Array.isArray(d) ? d : []))
+      .catch(() => {});
+  }, []);
 
-  const loadWeek=useCallback(async(mon,silent=false)=>{
-    if(!silent)setLoading(true);
-    try{const r=await fetch(`/api/calendar?week=${mon}`);if(r.ok){const d=await r.json();setEvents(Array.isArray(d.events)?d.events:[]);}}
-    catch{}finally{if(!silent)setLoading(false);}
-  },[]);
+  // Load events for visible range
+  const loadRange = useCallback(async (start, silent = false) => {
+    if (!silent) setLoading(true);
+    try {
+      // We fetch week by week to cover the whole month view
+      // API supports ?week= param; we fetch 6 weeks using 6 calls merged
+      // Simpler: use a date range query — send the Monday of first week
+      const mon = mondayOf(start);
+      const weeks = [];
+      for (let i = 0; i < 6; i++) weeks.push(addDays(mon, i * 7));
 
-  useEffect(()=>{ loadRef.current=()=>loadWeek(monday,true); },[loadWeek,monday]);
-  useEffect(()=>{ loadWeek(monday); },[monday,loadWeek]);
+      const results = await Promise.all(
+        weeks.map(w => fetch(`/api/calendar?week=${w}`).then(r => r.ok ? r.json() : { events: [] }))
+      );
+      const all = [];
+      const seen = new Set();
+      for (const r of results) {
+        for (const ev of (r.events || [])) {
+          const uid = `${ev._type}_${ev.id}_${ev.date}_${ev.start_time}`;
+          if (!seen.has(uid)) { seen.add(uid); all.push(ev); }
+        }
+      }
+      setEvents(all);
+    } catch { setEvents([]); }
+    finally { if (!silent) setLoading(false); }
+  }, []);
 
-  // Scroll to ~9am on load
-  useEffect(()=>{
-    if(!loading&&scrollRef.current){
-      scrollRef.current.scrollTop=Math.max(0,toPx("08:30")-40);
-    }
-  },[loading]);
+  useEffect(() => { loadRange(viewStart); }, [year, month]);
 
-  function toast_(msg,ok=true){ setToast({msg,ok}); setTimeout(()=>setToast(null),3000); }
-
-  const byDate=useMemo(()=>{
-    const m={};
-    for(const ev of events){if(!m[ev.date])m[ev.date]=[];m[ev.date].push(ev);}
-    return m;
-  },[events]);
-
-  // ── Drag ──────────────────────────────────────────────────────────────────
-  function startDrag(e,ev,mode){
-    if(e.button!==0)return; e.preventDefault(); e.stopPropagation();
-    dragRef.current={ev,mode,startY:e.clientY,startX:e.clientX,origStart:toMin(ev.start_time),origEnd:toMin(ev.end_time),origDate:ev.date,curDate:ev.date};
-    setGhost({...ev,_dragging:true});
-    window.addEventListener("pointermove",onDragMove,{passive:false});
-    window.addEventListener("pointerup",onDragEnd);
+  function showToast(msg, ok = true) {
+    setToast({ msg, ok });
+    setTimeout(() => setToast(null), 2800);
   }
 
-  const onDragMove=useCallback((e)=>{
-    const ds=dragRef.current; if(!ds)return;
-    const dy=e.clientY-ds.startY;
-    const delta=snapM((dy/CELL_H)*60);
-    if(ds.mode==="resize"){
-      const newEnd=clampM(ds.origEnd+delta);
-      if(newEnd<=ds.origStart+SNAP)return;
-      setGhost(g=>g?{...g,start_time:ds.ev.start_time,end_time:toStr(newEnd),date:ds.curDate}:null);
-      return;
-    }
-    const newStart=clampM(ds.origStart+delta);
-    const dur=ds.origEnd-ds.origStart;
-    const newEnd=Math.min(HOUR_END*60,newStart+dur);
-    let hovered=ds.origDate;
-    for(const[dayISO,el] of Object.entries(colRefs.current)){
-      if(!el)continue;
-      const r=el.getBoundingClientRect();
-      if(e.clientX>=r.left&&e.clientX<=r.right){hovered=dayISO;break;}
-    }
-    if(!isPastDate(hovered)){
-      ds.curDate=hovered;
-      setGhost(g=>g?{...g,start_time:toStr(newStart),end_time:toStr(newEnd),date:hovered}:null);
-    }
-  },[]);
-
-  const onDragEnd=useCallback(async()=>{
-    window.removeEventListener("pointermove",onDragMove);
-    window.removeEventListener("pointerup",onDragEnd);
-    const ds=dragRef.current; dragRef.current=null;
-    if(!ds||!ghost){setGhost(null);return;}
-    const{ev}=ds; const ng=ghost;
-    if(ng.date===ev.date&&ng.start_time===ev.start_time&&ng.end_time===ev.end_time){setGhost(null);return;}
-    if(isPastDate(ng.date)||isPastSlot(ng.date,ng.end_time)){toast_("Cannot move to the past.",false);setGhost(null);return;}
-    setEvents(prev=>prev.map(e=>String(e.id)===String(ev.id)?{...e,date:ng.date,start_time:ng.start_time,end_time:ng.end_time}:e));
-    setGhost(null);
-    const type=ev._type==="availability"?"availability":"appointment";
-    const realId=ev._real_id||ev.id;
-    try{
-      const r=await fetch("/api/calendar",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:realId,type,date:ng.date,start_time:ng.start_time,end_time:ng.end_time})});
-      if(!r.ok){const d=await r.json();toast_(d.error||"Move failed.",false);loadRef.current?.();}
-    }catch{toast_("Network error.",false);loadRef.current?.();}
-  },[ghost,onDragMove]);
-
-  async function onCreate(payload){
-    if(isPastDate(payload.date))return"Cannot create events in the past.";
-    if(isPastSlot(payload.date,payload.end_time))return"This time slot has already passed.";
-    try{
-      const r=await fetch("/api/calendar",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
-      const d=await r.json();
-      if(r.ok){await loadWeek(monday,true);setModal(null);toast_(payload.status==="available"?"Working hours added":"Booking created");return null;}
-      return d.error||"Save failed.";
-    }catch{return"Network error.";}
+  function prevMonth() {
+    if (month === 0) { setYear(y => y - 1); setMonth(11); }
+    else setMonth(m => m - 1);
+  }
+  function nextMonth() {
+    if (month === 11) { setYear(y => y + 1); setMonth(0); }
+    else setMonth(m => m + 1);
+  }
+  function goToday() {
+    const now = new Date();
+    setYear(now.getFullYear());
+    setMonth(now.getMonth());
   }
 
-  async function onUpdate(payload){
-    const type=payload._type==="availability"?"availability":"appointment";
-    const realId=payload._real_id||payload.id;
-    try{
-      const r=await fetch("/api/calendar",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,id:realId,type})});
-      const d=await r.json();
-      if(r.ok){await loadWeek(monday,true);setModal(null);toast_("Saved");return null;}
-      return d.error||"Update failed.";
-    }catch{return"Network error.";}
+  // Click empty area of a day → create modal
+  function onDayClick(e, iso) {
+    if (e.target !== e.currentTarget) return; // only blank area
+    setModal({ type: "create", date: iso, start_time: "09:00", end_time: "10:00",
+      defMode: services.length > 0 ? "booking" : "hours" });
   }
 
-  async function onDelete(ev){
-    const type=ev._type==="availability"?"availability":"appointment";
-    const realId=ev._real_id||ev.id;
-    try{
-      const r=await fetch(`/api/calendar?id=${realId}&type=${type}`,{method:"DELETE"});
-      if(r.ok){await loadWeek(monday,true);setModal(null);toast_("Deleted");}
-      else{const d=await r.json();toast_(d.error||"Delete failed.",false);}
-    }catch{toast_("Network error.",false);}
+  // Click a chip → edit modal
+  function onChipClick(e, ev) {
+    e.stopPropagation();
+    setModal({ type: "edit", event: ev });
   }
 
-  function onCellClick(e,dayISO){
-    if(e.target!==e.currentTarget)return;
-    if(isPastDate(dayISO))return;
-    const y=e.clientY-e.currentTarget.getBoundingClientRect().top;
-    const start=toStr(clampM(pxToMin(y)));
-    if(isPastSlot(dayISO,start))return;
-    setModal({type:"create",date:dayISO,start_time:start,end_time:addM(start,60),defMode:services.length>0?"booking":"hours"});
+  async function onCreate(payload) {
+    try {
+      const r = await fetch("/api/calendar", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const d = await r.json();
+      if (r.ok) {
+        await loadRange(viewStart, true);
+        setModal(null);
+        showToast(payload.status === "available" ? "Working hours added ✓" : "Booking created ✓");
+        return null;
+      }
+      return d.error || "Save failed.";
+    } catch { return "Network error."; }
   }
 
-  function onMiniDayClick(iso){
-    setDayFocus(iso);
-    setMonday(mondayOf(iso));
-    setViewMode("day");
+  async function onUpdate(payload) {
+    const type   = payload._type === "availability" ? "availability" : "appointment";
+    const realId = payload._real_id || payload.id;
+    try {
+      const r = await fetch("/api/calendar", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...payload, id: realId, type }),
+      });
+      const d = await r.json();
+      if (r.ok) { await loadRange(viewStart, true); setModal(null); showToast("Saved ✓"); return null; }
+      return d.error || "Update failed.";
+    } catch { return "Network error."; }
   }
 
-  const hourLabels = Array.from({length:HOURS},(_,i)=>`${pad(HOUR_START+i)}:00`);
+  async function onDelete(ev) {
+    const type   = ev._type === "availability" ? "availability" : "appointment";
+    const realId = ev._real_id || ev.id;
+    try {
+      const r = await fetch(`/api/calendar?id=${realId}&type=${type}`, { method: "DELETE" });
+      if (r.ok) { await loadRange(viewStart, true); setModal(null); showToast("Deleted"); }
+      else { const d = await r.json(); showToast(d.error || "Delete failed.", false); }
+    } catch { showToast("Network error.", false); }
+  }
 
   return (
-    <div style={{display:"flex",height:"100%",minHeight:0,background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-lg)",overflow:"hidden",fontFamily:"var(--font-sans)"}}>
+    <div style={{
+      display: "flex", flexDirection: "column", height: "100%", minHeight: 0,
+      background: "var(--bg)", fontFamily: "'DM Sans', sans-serif",
+    }}>
 
       {/* Toast */}
-      {toast&&(
-        <div style={{position:"fixed",bottom:24,right:24,zIndex:9999,padding:"10px 18px",borderRadius:"var(--border-radius-md)",fontSize:13,fontWeight:500,
-          background:toast.ok?"var(--color-background-success)":"var(--color-background-danger)",
-          color:toast.ok?"var(--color-text-success)":"var(--color-text-danger)",
-          border:`0.5px solid ${toast.ok?"var(--color-border-success)":"var(--color-border-danger)"}`,
-          boxShadow:"0 4px 24px rgba(0,0,0,0.12)"}}>
+      {toast && (
+        <div style={{
+          position: "fixed", bottom: 24, right: 24, zIndex: 9999,
+          padding: "10px 18px", borderRadius: 10, fontSize: 13, fontWeight: 500,
+          background: toast.ok ? "rgba(34,197,94,0.12)" : "rgba(239,68,68,0.12)",
+          border: `1px solid ${toast.ok ? "rgba(34,197,94,0.35)" : "rgba(239,68,68,0.35)"}`,
+          color: toast.ok ? "#4ade80" : "#f87171",
+          boxShadow: "0 4px 24px rgba(0,0,0,0.3)",
+          animation: "fadeUp .2s ease both",
+        }}>
           {toast.msg}
         </div>
       )}
 
-      {/* ── LEFT SIDEBAR ──────────────────────────────────────────────── */}
-      {sidebar&&(
-        <div style={{width:188,flexShrink:0,borderRight:"0.5px solid var(--color-border-tertiary)",display:"flex",flexDirection:"column",background:"var(--color-background-primary)"}}>
+      {/* ── Header ── */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 10,
+        padding: "12px 16px 10px", flexShrink: 0,
+      }}>
+        {/* Month + year */}
+        <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8 }}>
+          <h2 style={{
+            fontFamily: "'Syne', sans-serif", fontWeight: 800, fontSize: 20,
+            color: "var(--text)", letterSpacing: "-0.5px", margin: 0,
+          }}>
+            {formatMonthYear(year, month)}
+          </h2>
+          {/* Chevron nav */}
+          <button onClick={prevMonth} style={navBtnStyle}>‹</button>
+          <button onClick={nextMonth} style={navBtnStyle}>›</button>
+        </div>
 
-          {/* Sidebar header */}
-          <div style={{padding:"14px 12px 8px",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
-              <div style={{width:24,height:24,borderRadius:6,background:"#ff7a00",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
-                <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M2 2h12v8H9.5L7 13V10H2V2z" fill="#fff"/></svg>
-              </div>
-              <span style={{fontSize:13,fontWeight:500,color:"var(--color-text-primary)"}}>Calendar</span>
-            </div>
-            <MiniMonth focusDate={dayFocus} onDayClick={onMiniDayClick}/>
-          </div>
+        {/* Legend */}
+        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+          <LegDot color="#22c55e" label="Open" />
+          <LegDot color="#3b82f6" label="Booked" />
+        </div>
 
-          {/* Quick create buttons */}
-          <div style={{padding:"10px 12px",borderBottom:"0.5px solid var(--color-border-tertiary)",display:"flex",flexDirection:"column",gap:5}}>
-            <button onClick={()=>setModal({type:"create",date:todayISO(),start_time:"09:00",end_time:"17:00",defMode:"hours"})}
-              style={{display:"flex",alignItems:"center",gap:6,padding:"6px 9px",borderRadius:6,border:"0.5px solid var(--color-border-tertiary)",background:"var(--color-background-primary)",color:"var(--color-text-secondary)",fontSize:11,cursor:"pointer",transition:"all 0.12s",textAlign:"left"}}
-              onMouseEnter={e=>{e.currentTarget.style.borderColor="#22c55e";e.currentTarget.style.color="#16a34a";e.currentTarget.style.background="rgba(34,197,94,0.05)";}}
-              onMouseLeave={e=>{e.currentTarget.style.borderColor="var(--color-border-tertiary)";e.currentTarget.style.color="var(--color-text-secondary)";e.currentTarget.style.background="var(--color-background-primary)";}}>
-              <i className="ti ti-clock" style={{fontSize:13}} aria-hidden="true"/> Add working hours
-            </button>
-            <button onClick={()=>setModal({type:"create",date:viewMode==="day"?dayFocus:todayISO(),start_time:"09:00",end_time:"10:00",defMode:"booking"})}
-              style={{display:"flex",alignItems:"center",gap:6,padding:"6px 9px",borderRadius:6,border:"none",background:"#ff7a00",color:"#fff",fontSize:11,fontWeight:500,cursor:"pointer",transition:"filter 0.12s"}}
-              onMouseEnter={e=>e.currentTarget.style.filter="brightness(0.92)"}
-              onMouseLeave={e=>e.currentTarget.style.filter=""}>
-              <i className="ti ti-plus" style={{fontSize:13}} aria-hidden="true"/> New booking
-            </button>
-          </div>
+        {/* Actions */}
+        <button onClick={() => setModal({ type:"create", date:today, start_time:"09:00", end_time:"17:00", defMode:"hours" })}
+          style={{
+            padding: "6px 13px", borderRadius: 7, border: "1px solid rgba(34,197,94,0.35)",
+            background: "rgba(34,197,94,0.08)", color: "#22c55e", fontSize: 12,
+            fontWeight: 600, cursor: "pointer",
+          }}>
+          + Hours
+        </button>
+        <button onClick={() => setModal({ type:"create", date:today, start_time:"09:00", end_time:"10:00", defMode:"booking" })}
+          style={{
+            padding: "6px 13px", borderRadius: 7, border: "none",
+            background: "#ff7a00", color: "#fff", fontSize: 12,
+            fontWeight: 600, cursor: "pointer",
+            boxShadow: "0 0 14px rgba(255,122,0,0.3)",
+          }}>
+          + Booking
+        </button>
+        <button onClick={goToday} style={{ ...navBtnStyle, padding: "5px 10px", fontSize: 11, fontWeight: 600 }}>
+          Today
+        </button>
+      </div>
 
-          {/* Legend */}
-          <div style={{padding:"10px 12px"}}>
-            <p style={{fontSize:9,fontWeight:500,color:"var(--color-text-tertiary)",textTransform:"uppercase",letterSpacing:".07em",marginBottom:8}}>Legend</p>
-            <div style={{display:"flex",flexDirection:"column",gap:6}}>
-              <div style={{display:"flex",alignItems:"center",gap:7,fontSize:11,color:"var(--color-text-secondary)"}}>
-                <div style={{width:16,height:10,borderRadius:2,borderLeft:"2px solid #22c55e",background:"rgba(34,197,94,0.1)",flexShrink:0}}/>
-                Working hours
-              </div>
-              <div style={{display:"flex",alignItems:"center",gap:7,fontSize:11,color:"var(--color-text-secondary)"}}>
-                <div style={{width:16,height:10,borderRadius:2,background:"rgba(255,122,0,0.2)",borderLeft:"2px solid #ff7a00",flexShrink:0}}/>
-                Booking
-              </div>
-              <div style={{display:"flex",alignItems:"center",gap:7,fontSize:11,color:"var(--color-text-secondary)"}}>
-                <div style={{width:16,height:2,borderRadius:1,background:"#ef4444",flexShrink:0}}/>
-                Current time
-              </div>
-            </div>
+      {/* ── Day-name row ── */}
+      <div style={{
+        display: "grid", gridTemplateColumns: "repeat(7,1fr)",
+        padding: "0 8px", flexShrink: 0, gap: 4,
+        borderBottom: "1px solid var(--border)",
+        paddingBottom: 6,
+      }}>
+        {DAY_NAMES_S.map((name, i) => (
+          <div key={name} style={{
+            textAlign: "center", fontSize: 10, fontWeight: 700,
+            textTransform: "uppercase", letterSpacing: "0.07em",
+            color: i >= 5 ? "var(--text-dim)" : "var(--text-muted)",
+            padding: "2px 0",
+          }}>
+            {name}
           </div>
+        ))}
+      </div>
+
+      {/* ── Month grid ── */}
+      {loading ? (
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 10, color: "var(--text-muted)" }}>
+          <Spin /> <span style={{ fontSize: 13 }}>Loading…</span>
+        </div>
+      ) : (
+        <div style={{
+          flex: 1, minHeight: 0, overflowY: "auto",
+          display: "grid", gridTemplateColumns: "repeat(7,1fr)",
+          gridTemplateRows: "repeat(6,1fr)",
+          gap: 4, padding: "6px 8px 12px",
+        }}>
+          {grid.map(({ iso, inMonth }, idx) => {
+            const dayEvents  = eventMap[iso] || [];
+            const isToday    = iso === today;
+            const isPast     = iso < today;
+            const d          = new Date(iso + "T00:00:00");
+            const isWeekend  = idx % 7 >= 5;
+            const bookings   = dayEvents.filter(e => e._type === "appointment");
+            const avail      = dayEvents.filter(e => e._type === "availability" || e.status === "available");
+
+            return (
+              <div key={iso}
+                onClick={e => onDayClick(e, iso)}
+                style={{
+                  background: isToday
+                    ? "rgba(255,122,0,0.05)"
+                    : inMonth
+                    ? "var(--surface)"
+                    : "rgba(17,17,17,0.4)",
+                  border: isToday
+                    ? "1.5px solid rgba(255,122,0,0.4)"
+                    : "1px solid var(--border)",
+                  borderRadius: 10,
+                  padding: "6px 5px 5px",
+                  display: "flex", flexDirection: "column", gap: 3,
+                  cursor: "pointer",
+                  minHeight: 90,
+                  opacity: !inMonth ? 0.45 : isPast ? 0.65 : 1,
+                  transition: "border-color 0.12s",
+                  overflow: "hidden",
+                }}
+                onMouseEnter={e => { if (!isToday) e.currentTarget.style.borderColor = "var(--border-light)"; }}
+                onMouseLeave={e => { if (!isToday) e.currentTarget.style.borderColor = isToday ? "rgba(255,122,0,0.4)" : "var(--border)"; }}
+              >
+                {/* Date number */}
+                <div style={{
+                  width: 22, height: 22, borderRadius: "50%",
+                  display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+                  alignSelf: "center",
+                  background: isToday ? "#ff7a00" : "transparent",
+                  boxShadow: isToday ? "0 0 10px rgba(255,122,0,0.5)" : "none",
+                  fontSize: 11, fontWeight: isToday ? 800 : 600,
+                  color: isToday ? "#fff" : isWeekend ? "var(--text-dim)" : !inMonth ? "var(--text-dim)" : "var(--text)",
+                  fontFamily: "'Syne', sans-serif",
+                  marginBottom: 2,
+                  letterSpacing: "-0.3px",
+                }}>
+                  {d.getDate()}
+                </div>
+
+                {/* Event chips */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1, overflow: "hidden" }}>
+                  {/* Available slots */}
+                  {avail.map((ev, i) => (
+                    <Chip key={`av_${i}`} ev={ev} onClick={e => onChipClick(e, ev)} />
+                  ))}
+                  {/* Bookings */}
+                  {bookings.map((ev, i) => (
+                    <Chip key={`bk_${i}`} ev={ev} onClick={e => onChipClick(e, ev)} />
+                  ))}
+                  {/* Overflow indicator */}
+                  {dayEvents.length > 4 && (
+                    <div style={{
+                      fontSize: 9, color: "var(--text-dim)", textAlign: "center",
+                      padding: "1px 0", fontWeight: 600,
+                    }}>
+                      +{dayEvents.length - 4} more
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 
-      {/* ── MAIN CONTENT ──────────────────────────────────────────────── */}
-      <div style={{flex:1,display:"flex",flexDirection:"column",minWidth:0}}>
-
-        {/* Top bar */}
-        <div style={{height:48,borderBottom:"0.5px solid var(--color-border-tertiary)",display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 12px",flexShrink:0,gap:8}}>
-          <div style={{display:"flex",alignItems:"center",gap:8}}>
-            {/* Sidebar toggle */}
-            <button onClick={()=>setSidebar(s=>!s)}
-              style={{width:28,height:28,border:"0.5px solid var(--color-border-tertiary)",background:"var(--color-background-primary)",borderRadius:6,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:"var(--color-text-secondary)",transition:"all 0.12s"}}
-              title={sidebar?"Collapse sidebar":"Expand sidebar"}>
-              <i className={`ti ti-layout-sidebar${sidebar?"-right":""}`} style={{fontSize:14}} aria-hidden="true"/>
-            </button>
-
-            {/* Nav arrows */}
-            <div style={{display:"flex",gap:2}}>
-              <NavBtn onClick={()=>setMonday(m=>addDays(m,-7))} title="Previous week">‹</NavBtn>
-              <NavBtn onClick={()=>setMonday(m=>addDays(m,+7))} title="Next week">›</NavBtn>
-            </div>
-
-            {/* Today */}
-            <button onClick={()=>{setMonday(mondayOf(todayISO()));setDayFocus(todayISO());}}
-              style={{padding:"4px 10px",fontSize:11,fontWeight:500,border:"0.5px solid var(--color-border-tertiary)",background:"var(--color-background-primary)",borderRadius:6,cursor:"pointer",color:"var(--color-text-secondary)",transition:"all 0.12s"}}
-              onMouseEnter={e=>{e.currentTarget.style.borderColor="var(--color-border-primary)";e.currentTarget.style.color="var(--color-text-primary)";}}
-              onMouseLeave={e=>{e.currentTarget.style.borderColor="var(--color-border-tertiary)";e.currentTarget.style.color="var(--color-text-secondary)";}}>
-              Today
-            </button>
-
-            {/* Week label */}
-            <div style={{borderLeft:"0.5px solid var(--color-border-tertiary)",paddingLeft:10}}>
-              <span style={{fontSize:13,fontWeight:500,color:"var(--color-text-primary)"}}>
-                {viewMode==="week"
-                  ? `${MONTHS_S[new Date(monday+"T00:00:00").getMonth()]} ${new Date(monday+"T00:00:00").getDate()}–${new Date(addDays(monday,6)+"T00:00:00").getDate()}, ${new Date(addDays(monday,6)+"T00:00:00").getFullYear()}`
-                  : new Date(dayFocus+"T00:00:00").toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"})
-                }
-              </span>
-            </div>
-          </div>
-
-          {/* Right side */}
-          <div style={{display:"flex",alignItems:"center",gap:6}}>
-            {/* Week/Day toggle */}
-            <div style={{display:"flex",background:"var(--color-background-secondary)",borderRadius:6,padding:2,border:"0.5px solid var(--color-border-tertiary)"}}>
-              {[["week","Week"],["day","Day"]].map(([v,l])=>(
-                <button key={v} onClick={()=>setViewMode(v)}
-                  style={{padding:"4px 12px",borderRadius:5,border:"none",fontSize:11,fontWeight:500,cursor:"pointer",transition:"all 0.1s",
-                    background:viewMode===v?"var(--color-background-primary)":"transparent",
-                    color:viewMode===v?"var(--color-text-primary)":"var(--color-text-tertiary)",
-                    boxShadow:viewMode===v?"0 0.5px 2px rgba(0,0,0,0.08)":"none"}}>
-                  {l}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* Grid */}
-        <div style={{flex:1,display:"flex",minHeight:0,overflow:"hidden"}}>
-
-          {/* Time column (sticky) */}
-          <div style={{width:44,flexShrink:0,borderRight:"0.5px solid var(--color-border-tertiary)",position:"relative",background:"var(--color-background-primary)"}}>
-            <div style={{height:28,borderBottom:"0.5px solid var(--color-border-tertiary)"}}/>
-            <div style={{height:GRID_H,position:"relative"}}>
-              {hourLabels.map((h,i)=>(
-                <div key={i} style={{position:"absolute",top:i*CELL_H-8,left:0,right:0,display:"flex",justifyContent:"flex-end",padding:"0 6px",pointerEvents:"none"}}>
-                  <span style={{fontSize:9,color:"var(--color-text-tertiary)",fontFamily:"var(--font-mono)",lineHeight:1}}>{h}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Scrollable days area */}
-          <div ref={scrollRef} style={{flex:1,overflowY:"auto",overflowX:"hidden",minWidth:0}}>
-
-            {/* Day headers */}
-            <div style={{display:"grid",gridTemplateColumns:`repeat(${viewDays.length},1fr)`,height:28,borderBottom:"0.5px solid var(--color-border-tertiary)",position:"sticky",top:0,background:"var(--color-background-primary)",zIndex:20}}>
-              {viewDays.map((dayISO,i)=>{
-                const d=new Date(dayISO+"T00:00:00");
-                const isToday=dayISO===todayISO();
-                const isPast=isPastDate(dayISO);
-                const isWk=viewMode==="week";
-                const weekend=isWk&&i>=5;
-                const bkDots=(byDate[dayISO]||[]).filter(e=>e._type==="appointment");
-                const hasH=(byDate[dayISO]||[]).some(e=>e._type==="availability");
-                return (
-                  <div key={dayISO}
-                    onClick={()=>{ if(viewMode==="week"){setDayFocus(dayISO);setViewMode("day");} }}
-                    style={{display:"flex",alignItems:"center",justifyContent:"center",gap:5,borderLeft:i>0?"0.5px solid var(--color-border-tertiary)":"none",cursor:viewMode==="week"?"pointer":"default",
-                      background:isToday?"rgba(255,122,0,0.04)":isPast?"var(--color-background-tertiary)":"transparent",
-                      transition:"background 0.1s"}}
-                    onMouseEnter={e=>{ if(viewMode==="week") e.currentTarget.style.background="var(--color-background-secondary)"; }}
-                    onMouseLeave={e=>e.currentTarget.style.background=isToday?"rgba(255,122,0,0.04)":isPast?"var(--color-background-tertiary)":"transparent"}>
-                    <span style={{fontSize:9,fontWeight:500,textTransform:"uppercase",letterSpacing:".05em",
-                      color:isToday?"#ff7a00":weekend?"var(--color-text-tertiary)":"var(--color-text-tertiary)"}}>
-                      {viewMode==="day"?d.toLocaleDateString("en-US",{weekday:"short"}):DAYS_SHORT[i]}
-                    </span>
-                    <div style={{width:20,height:20,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",
-                      background:isToday?"#ff7a00":"transparent",
-                      fontSize:11,fontWeight:isToday?500:400,
-                      color:isToday?"#fff":isPast?"var(--color-text-tertiary)":weekend?"var(--color-text-tertiary)":"var(--color-text-secondary)"}}>
-                      {d.getDate()}
-                    </div>
-                    {hasH&&<span style={{width:5,height:5,borderRadius:"50%",background:"#22c55e",flexShrink:0}}/>}
-                    {bkDots.slice(0,2).map((ev,k)=><span key={k} style={{width:4,height:4,borderRadius:"50%",background:bkColor(ev).base,flexShrink:0}}/>)}
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Hour grid */}
-            {loading?(
-              <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:300,gap:10,color:"var(--color-text-tertiary)"}}>
-                <div style={{width:16,height:16,border:"1.5px solid var(--color-border-tertiary)",borderTopColor:"#ff7a00",borderRadius:"50%",animation:"spin .7s linear infinite"}}/>
-                <span style={{fontSize:12}}>Loading…</span>
-              </div>
-            ):(
-              <div style={{display:"grid",gridTemplateColumns:`repeat(${viewDays.length},1fr)`,height:GRID_H,position:"relative"}}>
-                {viewDays.map((dayISO,colIdx)=>{
-                  const dayEvs  = byDate[dayISO]||[];
-                  const rawHrs  = dayEvs.filter(e=>e._type==="availability"||e.status==="available");
-                  const workHrs = mergeHours(rawHrs);
-                  const bookings= dayEvs.filter(e=>e._type==="appointment");
-                  const isToday = dayISO===todayISO();
-                  const isPast  = isPastDate(dayISO);
-
-                  return (
-                    <div key={dayISO}
-                      ref={el=>colRefs.current[dayISO]=el}
-                      onClick={e=>onCellClick(e,dayISO)}
-                      style={{
-                        position:"relative",
-                        borderLeft:colIdx>0?"0.5px solid var(--color-border-tertiary)":"none",
-                        background:isToday?"rgba(255,122,0,0.012)":isPast?"var(--color-background-tertiary)":"transparent",
-                        cursor:isPast?"not-allowed":"crosshair",
-                      }}>
-
-                      {/* Hour lines */}
-                      {Array.from({length:HOURS},(_,i)=>(
-                        <div key={i} style={{position:"absolute",top:i*CELL_H,left:0,right:0,borderTop:i===0?"none":"0.5px solid var(--color-border-tertiary)",pointerEvents:"none"}}>
-                          <div style={{position:"absolute",top:CELL_H/2,left:"6%",right:0,borderTop:"0.5px solid var(--color-border-tertiary)",opacity:.35,pointerEvents:"none"}}/>
-                        </div>
-                      ))}
-
-                      {/* Past overlay — diagonal stripe on past days */}
-                      {(isPast||(isToday&&toPx(nowTime)>0))&&(
-                        <div style={{
-                          position:"absolute",top:0,left:0,right:0,
-                          height:isPast?GRID_H:toPx(nowTime),
-                          backgroundImage:"repeating-linear-gradient(45deg,rgba(0,0,0,0) 0,rgba(0,0,0,0) 6px,rgba(0,0,0,0.025) 6px,rgba(0,0,0,0.025) 7px)",
-                          pointerEvents:"none",zIndex:1,
-                        }}/>
-                      )}
-
-                      {/* Working hours — background lane */}
-                      {workHrs.map((ev,idx)=>{
-                        const top=toPx(ev.start_time), h=durPx(ev.start_time,ev.end_time);
-                        const isG=ghost&&(ghost._real_id===ev._real_id||String(ghost.id)===String(ev.id))&&ghost.date===dayISO;
-                        return (
-                          <div key={ev.id||`wh${idx}`}
-                            onPointerDown={e=>startDrag(e,ev,"move")}
-                            style={{position:"absolute",top,left:0,right:0,height:h,
-                              background:"rgba(34,197,94,0.07)",
-                              borderTop:"0.5px solid rgba(34,197,94,0.25)",
-                              borderBottom:"0.5px solid rgba(34,197,94,0.1)",
-                              borderLeft:"2px solid rgba(34,197,94,0.5)",
-                              zIndex:2,cursor:"grab",userSelect:"none",
-                              opacity:isG?.3:1,transition:"opacity .1s",
-                              display:"flex",alignItems:"flex-start",padding:"3px 7px",overflow:"hidden",
-                            }}>
-                            <span onClick={e=>{e.stopPropagation();setModal({type:"edit",event:ev});}}
-                              style={{fontSize:9,fontWeight:500,color:"rgba(22,163,74,0.8)",fontFamily:"var(--font-mono)",cursor:"pointer",letterSpacing:".04em",userSelect:"none",
-                                padding:"1px 5px",borderRadius:3,background:"rgba(34,197,94,0.1)",transition:"background 0.1s"}}
-                              onMouseEnter={e=>e.target.style.background="rgba(34,197,94,0.18)"}
-                              onMouseLeave={e=>e.target.style.background="rgba(34,197,94,0.1)"}>
-                              working hours
-                            </span>
-                            <div onPointerDown={e=>{e.stopPropagation();startDrag(e,ev,"resize");}}
-                              style={{position:"absolute",bottom:0,left:0,right:0,height:7,cursor:"ns-resize",display:"flex",alignItems:"center",justifyContent:"center"}}>
-                              <div style={{width:18,height:1.5,borderRadius:1,background:"rgba(34,197,94,0.35)"}}/>
-                            </div>
-                          </div>
-                        );
-                      })}
-
-                      {/* Bookings */}
-                      {bookings.map((ev,idx)=>{
-                        const c=bkColor(ev);
-                        const top=toPx(ev.start_time), h=durPx(ev.start_time,ev.end_time);
-                        const short=h<34;
-                        const isG=ghost&&String(ghost.id)===String(ev.id)&&ghost.date===dayISO;
-                        return (
-                          <div key={ev.id||`bk${idx}`}
-                            onPointerDown={e=>startDrag(e,ev,"move")}
-                            onClick={e=>{e.stopPropagation();setModal({type:"edit",event:ev});}}
-                            style={{position:"absolute",top:top+1,left:3,right:3,height:h-2,
-                              borderRadius:5,background:c.bg,
-                              borderLeft:`2px solid ${c.base}`,
-                              border:`0.5px solid ${c.border}`,borderLeft:`2px solid ${c.base}`,
-                              padding:short?"2px 7px":"5px 8px",
-                              cursor:"grab",overflow:"hidden",zIndex:10,userSelect:"none",
-                              opacity:isG?.3:1,transition:"opacity .1s,filter .1s",
-                            }}
-                            onMouseEnter={e=>{if(!dragRef.current){e.currentTarget.style.filter="brightness(0.93)";e.currentTarget.style.zIndex=20;}}}
-                            onMouseLeave={e=>{e.currentTarget.style.filter="";e.currentTarget.style.zIndex=10;}}>
-                            <div style={{fontSize:short?10:11,fontWeight:500,color:c.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",lineHeight:1.3,pointerEvents:"none"}}>
-                              {ev.service_name||ev.client_name||"Booking"}
-                            </div>
-                            {!short&&(
-                              <div style={{fontSize:9,color:c.text,opacity:.7,marginTop:1,fontFamily:"var(--font-mono)",pointerEvents:"none"}}>
-                                {fmt12(ev.start_time)}–{fmt12(ev.end_time)}
-                                {ev.client_name&&ev.client_name!=="Client"?` · ${ev.client_name}`:""}
-                              </div>
-                            )}
-                            <div onPointerDown={e=>{e.stopPropagation();startDrag(e,ev,"resize");}}
-                              style={{position:"absolute",bottom:0,left:0,right:0,height:7,cursor:"ns-resize",display:"flex",alignItems:"center",justifyContent:"center"}}>
-                              <div style={{width:22,height:1.5,borderRadius:1,background:hexRgba(c.base,.4)}}/>
-                            </div>
-                          </div>
-                        );
-                      })}
-
-                      {/* Ghost (drag preview) */}
-                      {ghost&&ghost.date===dayISO&&(()=>{
-                        const isWH=ghost._type==="availability";
-                        const c=isWH?{base:"#22c55e",bg:"rgba(34,197,94,0.18)",border:"rgba(34,197,94,0.6)",text:"rgba(22,163,74,0.9)"}:bkColor(ghost);
-                        const gh=durPx(ghost.start_time,ghost.end_time);
-                        return (
-                          <div style={{position:"absolute",top:toPx(ghost.start_time)+1,left:3,right:3,height:gh-2,
-                            borderRadius:5,background:c.bg,
-                            border:`1px dashed ${c.base}`,
-                            zIndex:50,pointerEvents:"none",
-                            display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:2,
-                          }}>
-                            <span style={{fontSize:10,fontWeight:500,color:c.text}}>{isWH?"Working hours":(ghost.service_name||ghost.client_name||"Booking")}</span>
-                            <span style={{fontSize:9,opacity:.7,fontFamily:"var(--font-mono)",color:c.text}}>{fmt12(ghost.start_time)}–{fmt12(ghost.end_time)}</span>
-                          </div>
-                        );
-                      })()}
-
-                      {/* Now line */}
-                      {isToday&&(()=>{
-                        const t=toPx(nowTime); if(t<0||t>GRID_H)return null;
-                        return (
-                          <div style={{position:"absolute",top:t,left:0,right:0,zIndex:25,pointerEvents:"none"}}>
-                            <div style={{position:"absolute",left:-3,top:-3,width:6,height:6,borderRadius:"50%",background:"#ef4444"}}/>
-                            <div style={{height:1,background:"#ef4444",opacity:.75}}/>
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  );
-                })}
-
-                {/* Empty state */}
-                {events.length===0&&(
-                  <div style={{position:"absolute",top:"50%",left:"50%",transform:"translate(-50%,-50%)",zIndex:40,pointerEvents:"none",
-                    textAlign:"center",background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",
-                    borderRadius:"var(--border-radius-lg)",padding:"24px 28px",maxWidth:280,
-                    boxShadow:"0 4px 24px rgba(0,0,0,0.08)"}}>
-                    <i className="ti ti-calendar" style={{fontSize:32,color:"var(--color-text-tertiary)",display:"block",marginBottom:10}} aria-hidden="true"/>
-                    <p style={{fontSize:13,fontWeight:500,color:"var(--color-text-secondary)",margin:"0 0 6px"}}>No events yet</p>
-                    <p style={{fontSize:11,color:"var(--color-text-tertiary)",lineHeight:1.65,margin:0}}>
-                      Click a time slot to add a booking, or use the sidebar to set working hours.
-                    </p>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* ── MODALS ──────────────────────────────────────────────────── */}
-      {modal?.type==="create"&&<CreateModal initial={modal} services={services} onSave={onCreate} onClose={()=>setModal(null)}/>}
-      {modal?.type==="edit"&&<EditModal event={modal.event} services={services} onSave={onUpdate} onDelete={onDelete} onClose={()=>setModal(null)}/>}
+      {/* ── Modals ── */}
+      {modal?.type === "create" && (
+        <CreateModal initial={modal} services={services} onSave={onCreate} onClose={() => setModal(null)} />
+      )}
+      {modal?.type === "edit" && (
+        <EditModal event={modal.event} services={services} onSave={onUpdate} onDelete={onDelete} onClose={() => setModal(null)} />
+      )}
     </div>
   );
 }
 
-// ─── Modals ───────────────────────────────────────────────────────────────────
-function Backdrop({children,onClose}){
-  return(
-    <div onClick={e=>{if(e.target===e.currentTarget)onClose();}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",backdropFilter:"blur(4px)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
-      <div style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-lg)",padding:20,width:"100%",maxWidth:392,boxShadow:"0 16px 48px rgba(0,0,0,0.16)",animation:"slideUp .18s ease both"}}>
-        <style>{`@keyframes slideUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}`}</style>
+// ── Chip ──────────────────────────────────────────────────────────────────────
+function Chip({ ev, onClick }) {
+  const c = evColor(ev);
+  const isAvail = ev._type === "availability" || ev.status === "available";
+  const label   = isAvail
+    ? ev.start_time
+    : ev.start_time;                         // both show the time
+  const sub     = isAvail ? "Open" : (ev.service_name || ev.client_name || "Booking");
+
+  return (
+    <div onClick={onClick}
+      style={{
+        background: c.chipBg,
+        border: `1px solid ${c.chipBorder}`,
+        borderRadius: 5,
+        padding: "3px 6px",
+        cursor: "pointer",
+        display: "flex", alignItems: "center", gap: 4,
+        transition: "filter 0.1s",
+        flexShrink: 0,
+        overflow: "hidden",
+      }}
+      onMouseEnter={e => e.currentTarget.style.filter = "brightness(1.15)"}
+      onMouseLeave={e => e.currentTarget.style.filter = ""}
+    >
+      {/* Time */}
+      <span style={{
+        fontSize: 9, fontWeight: 700, color: c.text,
+        fontFamily: "'JetBrains Mono', monospace",
+        whiteSpace: "nowrap", flexShrink: 0,
+      }}>
+        {label}
+      </span>
+      {/* Label */}
+      <span style={{
+        fontSize: 9, color: c.text, opacity: 0.8,
+        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        flex: 1,
+      }}>
+        {sub}
+      </span>
+    </div>
+  );
+}
+
+// ── Shared small UI ───────────────────────────────────────────────────────────
+function LegDot({ color, label }) {
+  return (
+    <span style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10, color: "var(--text-muted)" }}>
+      <span style={{ width: 8, height: 8, borderRadius: "50%", background: color, display: "inline-block" }} />
+      {label}
+    </span>
+  );
+}
+
+const navBtnStyle = {
+  display: "flex", alignItems: "center", justifyContent: "center",
+  width: 26, height: 26, borderRadius: 6,
+  border: "1px solid var(--border)", background: "transparent",
+  color: "var(--text-muted)", cursor: "pointer", fontSize: 14,
+  transition: "all .12s",
+};
+
+function Spin() {
+  return (
+    <div style={{ width: 16, height: 16, border: "2px solid rgba(255,122,0,0.15)",
+      borderTopColor: "#ff7a00", borderRadius: "50%", animation: "spin .65s linear infinite" }} />
+  );
+}
+
+// ── Modals ────────────────────────────────────────────────────────────────────
+function Modal({ children, onClose }) {
+  useEffect(() => {
+    const h = e => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onClose]);
+
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
+        backdropFilter: "blur(6px)", zIndex: 1000,
+        display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
+      }}>
+      <div style={{
+        background: "var(--surface)", border: "1px solid var(--border)",
+        borderRadius: 14, padding: 22, width: "100%", maxWidth: 400,
+        boxShadow: "0 20px 60px rgba(0,0,0,0.4)",
+        animation: "fadeUp .18s ease both",
+      }}>
+        <style>{`
+          @keyframes fadeUp { from { opacity:0; transform:translateY(10px) } to { opacity:1; transform:none } }
+          @keyframes spin   { to { transform:rotate(360deg) } }
+        `}</style>
         {children}
       </div>
     </div>
   );
 }
 
-function FL({label,children,s}){return<div style={s}><label style={{display:"block",fontSize:11,fontWeight:500,color:"var(--color-text-secondary)",marginBottom:5}}>{label}</label>{children}</div>;}
-function Err({children}){return<div style={{padding:"8px 11px",borderRadius:6,background:"var(--color-background-danger)",border:"0.5px solid var(--color-border-danger)",color:"var(--color-text-danger)",fontSize:12,marginBottom:11}}>{children}</div>;}
-function NoSvc(){return<div style={{padding:"10px 12px",borderRadius:6,background:"var(--color-background-warning)",border:"0.5px solid var(--color-border-warning)",fontSize:12,color:"var(--color-text-warning)",lineHeight:1.65}}>No services yet — go to <strong>Services</strong> to add one first.</div>;}
-function Opt(){return<span style={{color:"var(--color-text-tertiary)",fontWeight:400}}> (optional)</span>;}
-function NavBtn({onClick,children,title}){return<button onClick={onClick} title={title} style={{width:26,height:26,borderRadius:5,border:"0.5px solid var(--color-border-tertiary)",background:"var(--color-background-primary)",color:"var(--color-text-secondary)",cursor:"pointer",fontSize:14,display:"flex",alignItems:"center",justifyContent:"center",transition:"all .1s"}} onMouseEnter={e=>{e.currentTarget.style.borderColor="var(--color-border-primary)";e.currentTarget.style.color="var(--color-text-primary)";}} onMouseLeave={e=>{e.currentTarget.style.borderColor="var(--color-border-tertiary)";e.currentTarget.style.color="var(--color-text-secondary)";}}>{children}</button>;}
-function useEsc(fn){useEffect(()=>{const h=e=>{if(e.key==="Escape")fn();};window.addEventListener("keydown",h);return()=>window.removeEventListener("keydown",h);},[fn]);}
-const todayISOf=todayISO;
-
-function CreateModal({initial,services,onSave,onClose}){
-  const[mode,setMode]=useState(initial.defMode||"booking");
-  const[form,setForm]=useState({date:initial.date||"",start_time:initial.start_time||"09:00",end_time:initial.end_time||"10:00",client_name:"",phone:"",service_id:services[0]?.id||""});
-  const[saving,setSaving]=useState(false);
-  const[error,setError]=useState("");
-  useEsc(onClose);
-  const sf=k=>e=>setForm(f=>({...f,[k]:e.target.value}));
-  function onSvc(e){const sid=e.target.value,svc=services.find(s=>String(s.id)===String(sid));setForm(f=>({...f,service_id:sid,end_time:svc&&f.start_time?addM(f.start_time,svc.duration):f.end_time}));}
-  async function submit(e){
-    e.preventDefault();setError("");
-    if(!form.date){setError("Date is required.");return;}
-    if(form.start_time>=form.end_time){setError("End time must be after start time.");return;}
-    if(isPastDate(form.date)){setError("Cannot create events in the past.");return;}
-    setSaving(true);
-    const err=await onSave({...form,status:mode==="hours"?"available":"booked",...(mode==="hours"?{}:{service_id:form.service_id,client_name:form.client_name,phone:form.phone})});
-    setSaving(false);if(err)setError(err);
-  }
-  const noSvc=mode==="booking"&&services.length===0;
-  return(
-    <Backdrop onClose={onClose}>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
-        <h3 style={{fontSize:15,fontWeight:500,color:"var(--color-text-primary)",margin:0}}>New event</h3>
-        <button onClick={onClose} style={{width:24,height:24,border:"none",background:"none",cursor:"pointer",color:"var(--color-text-tertiary)",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:4,fontSize:14}}>
-          <i className="ti ti-x" aria-hidden="true"/>
-        </button>
-      </div>
-      {/* Mode tabs */}
-      <div style={{display:"flex",marginBottom:14,background:"var(--color-background-secondary)",borderRadius:7,padding:3,gap:2}}>
-        {[["hours","Working Hours","ti-clock"],["booking","Booking","ti-calendar-event"]].map(([v,l,ico])=>(
-          <button key={v} type="button" onClick={()=>{setMode(v);setError("");}}
-            style={{flex:1,padding:"7px 0",borderRadius:5,border:"none",cursor:"pointer",fontSize:11,fontWeight:500,display:"flex",alignItems:"center",justifyContent:"center",gap:5,transition:"all .1s",
-              background:mode===v?"var(--color-background-primary)":"transparent",
-              color:mode===v?"var(--color-text-primary)":"var(--color-text-tertiary)",
-              boxShadow:mode===v?"0 0.5px 2px rgba(0,0,0,0.08)":"none"}}>
-            <i className={`ti ${ico}`} style={{fontSize:13}} aria-hidden="true"/>{l}
-          </button>
-        ))}
-      </div>
-      <div style={{padding:"8px 11px",borderRadius:6,marginBottom:13,fontSize:11,lineHeight:1.65,
-        background:mode==="hours"?"rgba(34,197,94,0.06)":"rgba(255,122,0,0.06)",
-        border:`0.5px solid ${mode==="hours"?"rgba(34,197,94,0.2)":"rgba(255,122,0,0.2)"}`,
-        color:mode==="hours"?"var(--color-text-success)":"var(--color-text-warning)"}}>
-        {mode==="hours"?"Sets your open hours — shown as a green background lane on the grid.":"Creates a specific booking on your calendar."}
-      </div>
-      {error&&<Err>{error}</Err>}
-      <form onSubmit={submit} style={{display:"flex",flexDirection:"column",gap:11}}>
-        <FL label="Date"><input type="date" value={form.date} onChange={sf("date")} min={todayISOf()} required style={{width:"100%",fontSize:13}}/></FL>
-        <div style={{display:"flex",gap:8}}>
-          <FL label="Start" s={{flex:1}}><input type="time" value={form.start_time} onChange={sf("start_time")} required style={{width:"100%",fontSize:13}}/></FL>
-          <FL label="End" s={{flex:1}}><input type="time" value={form.end_time} onChange={sf("end_time")} required style={{width:"100%",fontSize:13}}/></FL>
-        </div>
-        {mode==="booking"&&(noSvc?<NoSvc/>:<>
-          <FL label="Service"><select value={form.service_id} onChange={onSvc} style={{width:"100%",fontSize:13}}>
-            <option value="">Select service…</option>
-            {services.map(s=><option key={s.id} value={s.id}>{s.name} · ${parseFloat(s.price||0).toFixed(2)} · {s.duration}min</option>)}
-          </select></FL>
-          <FL label={<>Client name<Opt/></>}><input type="text" value={form.client_name} onChange={sf("client_name")} placeholder="e.g. John Smith" style={{width:"100%",fontSize:13}}/></FL>
-          <FL label={<>Phone<Opt/></>}><input type="tel" value={form.phone} onChange={sf("phone")} placeholder="+1 234 567 890" style={{width:"100%",fontSize:13}}/></FL>
-        </>)}
-        <div style={{display:"flex",gap:7,marginTop:4}}>
-          <button type="submit" disabled={saving||noSvc}
-            style={{flex:1,padding:"10px 0",borderRadius:7,border:"none",fontWeight:500,fontSize:13,cursor:(saving||noSvc)?"not-allowed":"pointer",transition:"filter .1s",
-              background:mode==="hours"?"#22c55e":"#ff7a00",color:mode==="hours"?"#fff":"#fff",opacity:(saving||noSvc)?.5:1}}>
-            {saving?"Saving…":mode==="hours"?"Add working hours":"Create booking"}
-          </button>
-          <button type="button" onClick={onClose} style={{padding:"10px 16px",borderRadius:7,border:"0.5px solid var(--color-border-tertiary)",background:"var(--color-background-primary)",color:"var(--color-text-secondary)",fontWeight:400,fontSize:13,cursor:"pointer"}}>Cancel</button>
-        </div>
-      </form>
-    </Backdrop>
+function FL({ label, children, half }) {
+  return (
+    <div style={{ flex: half ? 1 : "none" }}>
+      <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: "var(--text-muted)",
+        textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 5 }}>
+        {label}
+      </label>
+      {children}
+    </div>
   );
 }
 
-function EditModal({event,services,onSave,onDelete,onClose}){
-  const isWH=event._type==="availability"||event.status==="available";
-  const[form,setForm]=useState({date:event.date,start_time:event.start_time,end_time:event.end_time,service_id:event.service_id||(services[0]?.id||""),client_name:event.client_name||"",phone:event.phone||""});
-  const[saving,setSaving]=useState(false);
-  const[conf,setConf]=useState(false);
-  const[error,setError]=useState("");
-  useEsc(onClose);
-  const sf=k=>e=>setForm(f=>({...f,[k]:e.target.value}));
-  function onSvc(e){const sid=e.target.value,svc=services.find(s=>String(s.id)===String(sid));setForm(f=>({...f,service_id:sid,end_time:svc&&f.start_time?addM(f.start_time,svc.duration):f.end_time}));}
-  async function submit(e){
-    e.preventDefault();setError("");
-    if(form.start_time>=form.end_time){setError("End time must be after start time.");return;}
-    setSaving(true);
-    const err=await onSave({...event,...form});
-    setSaving(false);if(err)setError(err);
+function ErrBanner({ msg }) {
+  if (!msg) return null;
+  return (
+    <div style={{ padding: "8px 12px", borderRadius: 7, background: "rgba(239,68,68,0.08)",
+      border: "1px solid rgba(239,68,68,0.2)", color: "#f87171", fontSize: 12, marginBottom: 12 }}>
+      {msg}
+    </div>
+  );
+}
+
+function Opt() { return <span style={{ color: "var(--text-dim)", fontWeight: 400 }}> (optional)</span>; }
+
+function CreateModal({ initial, services, onSave, onClose }) {
+  const [mode, setMode] = useState(initial.defMode || "booking");
+  const [form, setForm] = useState({
+    date:        initial.date       || "",
+    start_time:  initial.start_time || "09:00",
+    end_time:    initial.end_time   || "10:00",
+    client_name: "",
+    phone:       "",
+    service_id:  services[0]?.id   || "",
+  });
+  const [saving, setSaving] = useState(false);
+  const [error,  setError]  = useState("");
+
+  const sf = k => e => setForm(f => ({ ...f, [k]: e.target.value }));
+
+  function onSvcChange(e) {
+    const sid = e.target.value;
+    const svc = services.find(s => String(s.id) === String(sid));
+    setForm(f => ({
+      ...f, service_id: sid,
+      end_time: svc ? addMinutes(f.start_time, svc.duration) : f.end_time,
+    }));
   }
-  const svc=services.find(s=>String(s.id)===String(event.service_id));
-  const c=isWH?{base:"#22c55e"}:bkColor(event);
-  return(
-    <Backdrop onClose={onClose}>
-      <div style={{height:2,background:c.base,borderRadius:"8px 8px 0 0",margin:"-20px -20px 16px"}}/>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
-        <h3 style={{fontSize:15,fontWeight:500,color:"var(--color-text-primary)",margin:0}}>
-          {isWH?"Edit working hours":(svc?.name||"Edit booking")}
-        </h3>
-        <div style={{display:"flex",alignItems:"center",gap:6}}>
-          <span style={{fontSize:10,fontWeight:500,padding:"2px 7px",borderRadius:4,
-            background:isWH?"var(--color-background-success)":"rgba(255,122,0,0.08)",
-            color:isWH?"var(--color-text-success)":"#ff7a00",
-            border:`0.5px solid ${isWH?"var(--color-border-success)":"rgba(255,122,0,0.25)"}`}}>
-            {isWH?"Open":"Booked"}
-          </span>
-          <button onClick={onClose} style={{width:24,height:24,border:"none",background:"none",cursor:"pointer",color:"var(--color-text-tertiary)",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:4,fontSize:14}}>
-            <i className="ti ti-x" aria-hidden="true"/>
-          </button>
-        </div>
+
+  async function submit(e) {
+    e.preventDefault(); setError("");
+    if (!form.date)                       { setError("Date is required."); return; }
+    if (form.start_time >= form.end_time) { setError("End time must be after start."); return; }
+    setSaving(true);
+    const err = await onSave({
+      ...form,
+      status: mode === "hours" ? "available" : "booked",
+      ...(mode === "hours" ? {} : { service_id: form.service_id, client_name: form.client_name, phone: form.phone }),
+    });
+    setSaving(false);
+    if (err) setError(err);
+  }
+
+  const noSvc = mode === "booking" && services.length === 0;
+
+  return (
+    <Modal onClose={onClose}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+        <h3 style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", margin: 0 }}>New Event</h3>
+        <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer",
+          color: "var(--text-muted)", fontSize: 18, lineHeight: 1, padding: 2 }}>×</button>
       </div>
-      {error&&<Err>{error}</Err>}
-      <form onSubmit={submit} style={{display:"flex",flexDirection:"column",gap:11}}>
-        <FL label="Date"><input type="date" value={form.date} onChange={sf("date")} required style={{width:"100%",fontSize:13}}/></FL>
-        <div style={{display:"flex",gap:8}}>
-          <FL label="Start" s={{flex:1}}><input type="time" value={form.start_time} onChange={sf("start_time")} required style={{width:"100%",fontSize:13}}/></FL>
-          <FL label="End" s={{flex:1}}><input type="time" value={form.end_time} onChange={sf("end_time")} required style={{width:"100%",fontSize:13}}/></FL>
-        </div>
-        {!isWH&&services.length>0&&<>
-          <FL label="Service"><select value={form.service_id} onChange={onSvc} style={{width:"100%",fontSize:13}}>
-            <option value="">Select service…</option>
-            {services.map(s=><option key={s.id} value={s.id}>{s.name} · ${parseFloat(s.price||0).toFixed(2)} · {s.duration}min</option>)}
-          </select></FL>
-          <FL label={<>Client name<Opt/></>}><input type="text" value={form.client_name} onChange={sf("client_name")} style={{width:"100%",fontSize:13}}/></FL>
-          <FL label={<>Phone<Opt/></>}><input type="tel" value={form.phone} onChange={sf("phone")} style={{width:"100%",fontSize:13}}/></FL>
-        </>}
-        <div style={{display:"flex",gap:7,marginTop:4}}>
-          <button type="submit" disabled={saving}
-            style={{flex:2,padding:"10px 0",borderRadius:7,border:"none",fontWeight:500,fontSize:13,cursor:saving?"not-allowed":"pointer",
-              background:isWH?"#22c55e":"#ff7a00",color:"#fff",opacity:saving?.5:1,transition:"filter .1s"}}
-            onMouseEnter={e=>e.currentTarget.style.filter="brightness(0.92)"}
-            onMouseLeave={e=>e.currentTarget.style.filter=""}>
-            {saving?"Saving…":"Save changes"}
+
+      {/* Mode toggle */}
+      <div style={{ display: "flex", gap: 0, marginBottom: 14, background: "var(--surface-2)",
+        borderRadius: 8, padding: 3 }}>
+        {[["hours","🕐 Working Hours"],["booking","📋 Booking"]].map(([v,l]) => (
+          <button key={v} type="button" onClick={() => { setMode(v); setError(""); }}
+            style={{ flex: 1, padding: "7px 0", borderRadius: 6, border: "none", cursor: "pointer",
+              fontSize: 11, fontWeight: 600, transition: "all .12s",
+              background: mode===v ? "var(--surface)" : "transparent",
+              color: mode===v ? "var(--text)" : "var(--text-muted)",
+              boxShadow: mode===v ? "0 1px 4px rgba(0,0,0,0.15)" : "none" }}>
+            {l}
           </button>
-          {!conf&&<button type="button" onClick={()=>setConf(true)}
-            style={{flex:1,padding:"10px 0",borderRadius:7,border:"0.5px solid var(--color-border-danger)",background:"var(--color-background-danger)",color:"var(--color-text-danger)",fontWeight:400,fontSize:13,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
-            <i className="ti ti-trash" style={{fontSize:13}} aria-hidden="true"/> Delete
-          </button>}
-          {conf&&<button type="button" onClick={()=>onDelete(event)}
-            style={{flex:1,padding:"10px 0",borderRadius:7,border:"none",background:"#ef4444",color:"#fff",fontWeight:500,fontSize:13,cursor:"pointer"}}>
-            Confirm
-          </button>}
-          <button type="button" onClick={conf?()=>setConf(false):onClose}
-            style={{flex:1,padding:"10px 0",borderRadius:7,border:"0.5px solid var(--color-border-tertiary)",background:"var(--color-background-primary)",color:"var(--color-text-secondary)",fontWeight:400,fontSize:13,cursor:"pointer"}}>
-            {conf?"Cancel":"Close"}
+        ))}
+      </div>
+
+      <ErrBanner msg={error} />
+
+      <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <FL label="Date">
+          <input type="date" value={form.date} onChange={sf("date")} min={todayISO()}
+            required style={{ width: "100%", fontSize: 13 }} />
+        </FL>
+        <div style={{ display: "flex", gap: 10 }}>
+          <FL label="Start" half>
+            <input type="time" value={form.start_time} onChange={sf("start_time")} required style={{ width: "100%", fontSize: 13 }} />
+          </FL>
+          <FL label="End" half>
+            <input type="time" value={form.end_time} onChange={sf("end_time")} required style={{ width: "100%", fontSize: 13 }} />
+          </FL>
+        </div>
+
+        {mode === "booking" && (
+          noSvc ? (
+            <div style={{ padding: "10px 12px", borderRadius: 8, background: "rgba(255,122,0,0.07)",
+              border: "1px solid rgba(255,122,0,0.2)", fontSize: 12, color: "#ff7a00", lineHeight: 1.65 }}>
+              ⚠️ No services yet — add one in the <strong>Services</strong> tab first.
+            </div>
+          ) : (
+            <>
+              <FL label="Service">
+                <select value={form.service_id} onChange={onSvcChange} style={{ width: "100%", fontSize: 13 }}>
+                  <option value="">Select a service…</option>
+                  {services.map(s => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} · ${parseFloat(s.price||0).toFixed(2)} · {s.duration}min
+                    </option>
+                  ))}
+                </select>
+              </FL>
+              <FL label={<>Client name<Opt /></>}>
+                <input type="text" value={form.client_name} onChange={sf("client_name")}
+                  placeholder="e.g. John Smith" style={{ width: "100%", fontSize: 13 }} />
+              </FL>
+              <FL label={<>Phone<Opt /></>}>
+                <input type="tel" value={form.phone} onChange={sf("phone")}
+                  placeholder="+1 234 567 890" style={{ width: "100%", fontSize: 13 }} />
+              </FL>
+            </>
+          )
+        )}
+
+        <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+          <button type="submit" disabled={saving || noSvc}
+            style={{ flex: 1, padding: "11px 0", borderRadius: 8, border: "none", fontWeight: 700,
+              fontSize: 13, cursor: (saving||noSvc) ? "not-allowed" : "pointer",
+              opacity: (saving||noSvc) ? 0.5 : 1,
+              background: mode === "hours" ? "#22c55e" : "#ff7a00", color: "#fff",
+              boxShadow: "0 2px 12px rgba(0,0,0,0.15)" }}>
+            {saving ? "Saving…" : mode === "hours" ? "Add working hours" : "Create booking"}
+          </button>
+          <button type="button" onClick={onClose}
+            style={{ padding: "11px 16px", borderRadius: 8, border: "1px solid var(--border)",
+              background: "transparent", color: "var(--text-muted)", fontSize: 13, cursor: "pointer" }}>
+            Cancel
           </button>
         </div>
       </form>
-    </Backdrop>
+    </Modal>
+  );
+}
+
+function EditModal({ event, services, onSave, onDelete, onClose }) {
+  const isWH  = event._type === "availability" || event.status === "available";
+  const [form, setForm] = useState({
+    date:        event.date,
+    start_time:  event.start_time,
+    end_time:    event.end_time,
+    service_id:  event.service_id || (services[0]?.id || ""),
+    client_name: event.client_name || "",
+    phone:       event.phone || "",
+  });
+  const [saving,  setSaving]  = useState(false);
+  const [confirm, setConfirm] = useState(false);
+  const [error,   setError]   = useState("");
+
+  const sf = k => e => setForm(f => ({ ...f, [k]: e.target.value }));
+  const c  = isWH ? { base: "#22c55e" } : evColor(event);
+  const svc = services.find(s => String(s.id) === String(event.service_id));
+
+  async function submit(e) {
+    e.preventDefault(); setError("");
+    if (form.start_time >= form.end_time) { setError("End time must be after start."); return; }
+    setSaving(true);
+    const err = await onSave({ ...event, ...form });
+    setSaving(false);
+    if (err) setError(err);
+  }
+
+  return (
+    <Modal onClose={onClose}>
+      <div style={{ height: 3, background: c.base, borderRadius: "12px 12px 0 0", margin: "-22px -22px 18px" }} />
+
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+        <h3 style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", margin: 0 }}>
+          {isWH ? "Edit working hours" : (svc?.name || "Edit booking")}
+        </h3>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 10, fontWeight: 700, padding: "3px 8px", borderRadius: 5,
+            textTransform: "uppercase", letterSpacing: ".06em",
+            background: isWH ? "rgba(34,197,94,0.1)" : "rgba(59,130,246,0.1)",
+            color: isWH ? "#22c55e" : "#3b82f6",
+            border: `1px solid ${isWH ? "rgba(34,197,94,0.25)" : "rgba(59,130,246,0.25)"}` }}>
+            {isWH ? "Open" : "Booked"}
+          </span>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer",
+            color: "var(--text-muted)", fontSize: 18, lineHeight: 1, padding: 2 }}>×</button>
+        </div>
+      </div>
+
+      {!isWH && event.client_name && event.client_name !== "Client" && (
+        <div style={{ display: "flex", gap: 8, marginBottom: 12, fontSize: 12, color: "var(--text-muted)" }}>
+          <span>👤 {event.client_name}</span>
+          {event.phone && <span>📞 {event.phone}</span>}
+        </div>
+      )}
+
+      <ErrBanner msg={error} />
+
+      <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <FL label="Date">
+          <input type="date" value={form.date} onChange={sf("date")} required style={{ width: "100%", fontSize: 13 }} />
+        </FL>
+        <div style={{ display: "flex", gap: 10 }}>
+          <FL label="Start" half>
+            <input type="time" value={form.start_time} onChange={sf("start_time")} required style={{ width: "100%", fontSize: 13 }} />
+          </FL>
+          <FL label="End" half>
+            <input type="time" value={form.end_time} onChange={sf("end_time")} required style={{ width: "100%", fontSize: 13 }} />
+          </FL>
+        </div>
+
+        {!isWH && services.length > 0 && (
+          <>
+            <FL label="Service">
+              <select value={form.service_id} onChange={sf("service_id")} style={{ width: "100%", fontSize: 13 }}>
+                <option value="">Select…</option>
+                {services.map(s => (
+                  <option key={s.id} value={s.id}>{s.name} · ${parseFloat(s.price||0).toFixed(2)}</option>
+                ))}
+              </select>
+            </FL>
+            <FL label={<>Client<Opt /></>}>
+              <input type="text" value={form.client_name} onChange={sf("client_name")} style={{ width: "100%", fontSize: 13 }} />
+            </FL>
+            <FL label={<>Phone<Opt /></>}>
+              <input type="tel" value={form.phone} onChange={sf("phone")} style={{ width: "100%", fontSize: 13 }} />
+            </FL>
+          </>
+        )}
+
+        <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+          <button type="submit" disabled={saving}
+            style={{ flex: 2, padding: "11px 0", borderRadius: 8, border: "none", fontWeight: 700,
+              fontSize: 13, cursor: saving ? "not-allowed" : "pointer", opacity: saving ? 0.5 : 1,
+              background: isWH ? "#22c55e" : "#ff7a00", color: "#fff" }}>
+            {saving ? "Saving…" : "Save changes"}
+          </button>
+
+          {!confirm ? (
+            <button type="button" onClick={() => setConfirm(true)}
+              style={{ flex: 1, padding: "11px 0", borderRadius: 8, fontSize: 13, cursor: "pointer",
+                border: "1px solid rgba(239,68,68,0.3)", background: "rgba(239,68,68,0.07)", color: "#f87171" }}>
+              Delete
+            </button>
+          ) : (
+            <button type="button" onClick={() => onDelete(event)}
+              style={{ flex: 1, padding: "11px 0", borderRadius: 8, border: "none", fontSize: 13,
+                fontWeight: 700, cursor: "pointer", background: "#ef4444", color: "#fff" }}>
+              Confirm
+            </button>
+          )}
+
+          <button type="button" onClick={confirm ? () => setConfirm(false) : onClose}
+            style={{ flex: 1, padding: "11px 0", borderRadius: 8, border: "1px solid var(--border)",
+              background: "transparent", color: "var(--text-muted)", fontSize: 13, cursor: "pointer" }}>
+            {confirm ? "Cancel" : "Close"}
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }

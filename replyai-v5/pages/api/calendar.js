@@ -186,6 +186,46 @@ export default async function handler(req, res) {
       return res.status(201).json({ ...(created || {}), _type: "appointment" });
     }
 
+    // ── PUT (edit existing event) ────────────────────────────────────────────
+    if (req.method === "PUT") {
+      const { id, type = "appointment", date, start_time, end_time,
+              client_name, phone, service_id } = req.body || {};
+
+      const err = collect(
+        v.date(date),
+        v.time(start_time, "start_time"),
+        v.time(end_time, "end_time")
+      );
+      if (err) return res.status(400).json({ error: err });
+      if (start_time >= end_time)
+        return res.status(400).json({ error: "End time must be after start time." });
+
+      if (type === "availability") {
+        const realId = String(id).replace("av_", "");
+        const row = await dbGet(db, "SELECT id FROM availability WHERE id=$1 AND user_id=$2", [realId, user.id]);
+        if (!row) return res.status(404).json({ error: "Slot not found." });
+        await dbRun(db,
+          "UPDATE availability SET date=$1, start_time=$2, end_time=$3 WHERE id=$4",
+          [date, start_time, end_time, realId]
+        );
+      } else {
+        const row = await dbGet(db, "SELECT id FROM appointments WHERE id=$1 AND user_id=$2", [id, user.id]);
+        if (!row) return res.status(404).json({ error: "Appointment not found." });
+        const updates = ["date=$1", "start_time=$2", "end_time=$3"];
+        const params  = [date, start_time, end_time];
+        let idx = 4;
+        if (service_id !== undefined) { updates.push(`service_id=$${idx++}`); params.push(service_id || null); }
+        if (client_name !== undefined) { updates.push(`client_name=$${idx++}`); params.push(sanitize(client_name)); }
+        if (phone !== undefined) { updates.push(`phone=$${idx++}`); params.push(sanitize(phone)); }
+        params.push(id, user.id);
+        await dbRun(db,
+          `UPDATE appointments SET ${updates.join(",")} WHERE id=$${idx++} AND user_id=$${idx}`,
+          params
+        );
+      }
+      return res.status(200).json({ ok: true });
+    }
+
     // ── DELETE ───────────────────────────────────────────────────────────────
     if (req.method === "DELETE") {
       const { id, type = "appointment" } = req.query;
