@@ -1,0 +1,71 @@
+version: "3.9"
+networks:
+  replyai: { driver: bridge }
+volumes:
+  pg_data:
+  sqlite_data:
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: replyai_db
+    restart: unless-stopped
+    networks: [replyai]
+    volumes: [pg_data:/var/lib/postgresql/data]
+    environment:
+      POSTGRES_DB: replyai
+      POSTGRES_USER: replyai
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-replyai_secret}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U replyai -d replyai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_APP_URL: ${SITE_URL:-http://localhost:3000}
+    container_name: replyai_app
+    restart: unless-stopped
+    networks: [replyai]
+    ports: ["${APP_PORT:-3000}:3000"]
+    volumes: [sqlite_data:/app/data]
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://replyai:${POSTGRES_PASSWORD:-replyai_secret}@postgres:5432/replyai
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env — run: openssl rand -hex 32}
+      SITE_URL: ${SITE_URL:-http://localhost:3000}
+      EMAIL_USER: ${EMAIL_USER:-}
+      EMAIL_PASS: ${EMAIL_PASS:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN:-}
+      WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET:-}
+      AI_ENABLED: ${AI_ENABLED:-false}
+      AI_API_KEY: ${AI_API_KEY:-}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_PRICE_PRO_MONTHLY: ${STRIPE_PRICE_PRO_MONTHLY:-}
+      STRIPE_PRICE_BIZ_MONTHLY: ${STRIPE_PRICE_BIZ_MONTHLY:-}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+  # Uncomment to share publicly via Cloudflare Tunnel:
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   restart: unless-stopped
+  #   networks: [replyai]
+  #   command: tunnel --no-autoupdate run
+  #   environment:
+  #     TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+  #   depends_on: [app]

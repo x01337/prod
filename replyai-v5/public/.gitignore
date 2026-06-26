@@ -1,0 +1,15 @@
+node_modules/
+.next/
+out/
+data/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.local
+.env.production
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+coverage/
